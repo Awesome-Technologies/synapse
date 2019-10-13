@@ -130,10 +130,14 @@ def request_registration(
     return r
 
 
-def generate_pdf( user_list, server_location, dry_run, _print=print,):
+def generate_pdf( user_list, server_location, no_dry_run, logo, _print=print,):
 
     counter = 0
     pdf = FPDF('P', 'mm', 'A4')
+
+    _logo_file = 'logo.png'
+    if logo:
+        _logo_file = logo
 
     for user in user_list:
         # generate qr string
@@ -183,7 +187,7 @@ def generate_pdf( user_list, server_location, dry_run, _print=print,):
         pdf.set_font("Helvetica", size=12)
         pdf.text(140, start_y + 7, 'Ihr persönlicher Anmeldecode:')
 
-        pdf.image('logo.png', x = 81, y = start_y + 15,
+        pdf.image(_logo_file, x = 81, y = start_y + 15,
                     h = 30,
                     type = '', link = None)
         pdf.image('qr' + str(counter) + '.png', x = 143, y = start_y + 10,
@@ -273,7 +277,7 @@ def request_set_display_name( username, server_location, access_token, display_n
     return True
 
 
-def batch_register_new_users(file, server_location, admin_user, admin_password, dry_run, _print=print, exit=sys.exit,):
+def batch_register_new_users(file, server_location, admin_user, admin_password, no_dry_run, logo, _print=print, exit=sys.exit,):
 
     # login with admin user to gain access token
     _access_token = login(server_location, admin_user, admin_password)
@@ -333,7 +337,7 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
                     
 
 
-        generate_pdf(user_list, server_location, dry_run)
+        generate_pdf(user_list, server_location, no_dry_run, logo)
 
 
 def main():
@@ -363,6 +367,12 @@ def main():
     )
 
     parser.add_argument(
+        "-l",
+        "--logo",
+        default=None,
+        help="File to use as logo for the QR PDF",
+    )
+
     parser.add_argument(
         "--no-dry-run",
         action="store_true",
@@ -390,8 +400,12 @@ def main():
         print("No file for batch processing given.")
         sys.exit(1)
 
+    if args.logo:
+        if not os.path.isfile(args.logo):
+            print("Logo file does not exist.")
+            sys.exit(1)
 
-    batch_register_new_users(args.file, args.server_url, args.user, args.password, args.dry_run)
+    batch_register_new_users(args.file, args.server_url, args.user, args.password, args.no_dry_run, args.logo)
 
 
 if __name__ == "__main__":

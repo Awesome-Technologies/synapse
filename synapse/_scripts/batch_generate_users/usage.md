@@ -37,3 +37,6 @@ User is set as guest when `user_type` field contains `guest`, otherwise the user
 
 ### Encoding
 Perform a dry run first to check if all characters (especially german umlauts) are encoded correctly on the console output and the generated PDF file. On Windows based systems the file should be saved with ANSI encoding.
+
+## Logo
+A logo can be provided using the parameter `-l <path to logo>`. If no logo file is specified the script will use the file `logo.png` in the scripts folder.
