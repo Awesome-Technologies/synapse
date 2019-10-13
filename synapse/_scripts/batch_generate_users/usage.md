@@ -25,10 +25,15 @@ or
 ## CSV File format
 ### Format
 
-	first_name;last_name;admin;user_type
+	first_name;last_name;username;password;admin;user_type
 
-User is only set as admin when the admin field contains 'yes'
-User is set as guest when user_type field contains 'guest', otherwise the user will be a normal user.
+When `username` is left empty a 8-character username is generated, containing lowercase letters and digits.
+
+When `password` is left empty a 20-character password is generated, containing lowercase letters and digits.
+
+User is only set as admin when the `admin` field contains `yes`.
+
+User is set as guest when `user_type` field contains `guest`, otherwise the user will be a normal user.
 
 ### Encoding
 Perform a dry run first to check if all characters (especially german umlauts) are encoded correctly on the console output and the generated PDF file. On Windows based systems the file should be saved with ANSI encoding.
