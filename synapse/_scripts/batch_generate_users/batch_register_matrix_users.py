@@ -36,6 +36,7 @@ import qrcode
 from fpdf import FPDF
 import os
 import base64
+import time
 
 def sxor(s1,s2):    
     # convert strings to a list of character pair tuples
@@ -336,6 +337,8 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
                 user_list.append([_username, _user_id, _password, row['first_name'], row['last_name']])
                     
 
+            # avoid Error 429 "Too Many Requests"
+            time.sleep(3)
 
         generate_pdf(user_list, server_location, no_dry_run, logo)
 
