@@ -95,6 +95,7 @@ def login(server_location, admin_user, admin_password, _print=print, requests=_r
 def request_registration(
     user,
     password,
+    displayname,
     server_location,
     access_token,
     admin=False,
@@ -109,6 +110,7 @@ def request_registration(
     data = {
         "username": user,
         "password": password,
+        "displayname": displayname,
         "admin": admin,
         "user_type": user_type,
     }
@@ -125,7 +127,8 @@ def request_registration(
                 pass
         return False
 
-    return True
+    return r
+
 
 def generate_pdf( user_list, server_location, dry_run, _print=print,):
 
@@ -135,7 +138,11 @@ def generate_pdf( user_list, server_location, dry_run, _print=print,):
     for user in user_list:
         # generate qr string
         magicString = 'wo9k5tep252qxsa5yde7366kugy6c01w7oeeya9hrmpf0t7ii7'
-        urlString = 'user=' + user[0] + '&password=' + user[2]
+
+        if(user[0] == ''):
+            urlString = 'token=' + user[2]
+        else:
+            urlString = 'user=' + user[0] + '&password=' + user[2]
 
         while(len(urlString) > len(magicString)):
             magicString += magicString
@@ -269,9 +276,9 @@ def request_set_display_name( username, server_location, access_token, display_n
 def batch_register_new_users(file, server_location, admin_user, admin_password, dry_run, _print=print, exit=sys.exit,):
 
     # login with admin user to gain access token
-    access_token = login(server_location, admin_user, admin_password)
+    _access_token = login(server_location, admin_user, admin_password)
 
-    if access_token == False:
+    if _access_token == False:
         _print("ERROR! Admin user could not be logged in.")
         exit(1)
 
@@ -287,32 +294,44 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
             _print("Registering '" + row['first_name'], row['last_name'] + "'")
 
             # generate password
-            alphabet = string.ascii_letters + string.digits
-            username = ''.join(secrets.choice(alphabet) for i in range(8)).lower() # for a 8-character username
-            password = ''.join(secrets.choice(alphabet) for i in range(20)) # for a 20-character password
+            _alphabet = string.ascii_letters + string.digits
+            if row['username'] == '':
+                _username = ''.join(secrets.choice(_alphabet) for i in range(8)).lower() # for a 8-character username
+            else:
+                _username = row['username']
 
-            is_admin = False
+            if row['password'] == '':
+                _password = ''.join(secrets.choice(_alphabet) for i in range(20)) # for a 20-character password
+            else:
+                _password = row['password']
+
+            _is_admin = False
             if row['admin'] == 'yes':
-                is_admin = True
+                _is_admin = True
 
-            user_type = None
+            _user_type = None
+            _user_id = ''
             if row['user_type'] == 'guest':
-                user_type = 'guest'
+                _user_type = 'guest'
+                _display_name = "Gast"
+            else:
+                _display_name = row['first_name'] + " " + row['last_name']
+                _servername = server_location.split('/')[2]
+                _user_id = '@' + _username + ':' + _servername
 
-                if not request_registration(username, password, server_location, access_token, is_admin, user_type):
+            res = {}
             if no_dry_run:
+                res = request_registration(_username, _password, _display_name, server_location, _access_token, _is_admin, _user_type)
+                if res == False:    
                     _print("ERROR while registering user '" + row['first_name'], row['last_name'] + "'")
                     continue
+            # user is guest
+            if('user_id' in res and 'access_token' in res):
+                user_list.append(['', res.user_id, res.access_token, 'Gast', ''])
+            else:
+                user_list.append([_username, _user_id, _password, row['first_name'], row['last_name']])
+                    
 
-            # set display name
-            _display_name = row['first_name'] + " " + row['last_name']
-            _servername = server_location.split('/')[2]
-            _user_id = '@' + username + ':' + _servername
-
-            if not dry_run:
-                request_set_display_name( _user_id, server_location, access_token, _display_name)
-
-            user_list.append([username, _user_id, password, row['first_name'], row['last_name']])
 
         generate_pdf(user_list, server_location, dry_run)
 
