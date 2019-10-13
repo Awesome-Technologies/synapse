@@ -183,7 +183,7 @@ def generate_pdf( user_list, server_location, dry_run, _print=print,):
                     w = 50, h = 50,
                     type = '', link = None)
 
-        if dry_run:
+        if not no_dry_run:
             pdf.set_font("Helvetica", size=24)
             pdf.set_text_color(220, 50, 50)
             pdf.text(75, start_y + 30, 'Credentials not valid !')
@@ -228,10 +228,13 @@ def generate_pdf( user_list, server_location, dry_run, _print=print,):
         
         pdf.ln(2*th)
 
-    if dry_run:
-            pdf.set_font("Helvetica", size=24)
-            pdf.set_text_color(220, 50, 50)
-            pdf.text(75, start_y + 30, 'Credentials not valid !')
+    if not no_dry_run:
+        pdf.set_font("Helvetica", size=24)
+        pdf.set_text_color(220, 50, 50)
+        pdf.text(75, 60, 'Credentials not valid !')
+        pdf.text(75, 120, 'Credentials not valid !')
+        pdf.text(75, 180, 'Credentials not valid !')
+        pdf.text(75, 240, 'Credentials not valid !')
          
     pdf.output('Userlist.pdf','F')
 
@@ -296,8 +299,8 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
             if row['user_type'] == 'guest':
                 user_type = 'guest'
 
-            if not dry_run:
                 if not request_registration(username, password, server_location, access_token, is_admin, user_type):
+            if no_dry_run:
                     _print("ERROR while registering user '" + row['first_name'], row['last_name'] + "'")
                     continue
 
@@ -341,7 +344,8 @@ def main():
     )
 
     parser.add_argument(
-        "--dry-run",
+    parser.add_argument(
+        "--no-dry-run",
         action="store_true",
         help="Checks if given user has admin rights, input file is readable and if pdf can be generated correctly.",
     )
@@ -356,7 +360,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.dry_run:
+    if not args.no_dry_run:
         print("Performing dry run")
 
     if not args.server_url:
