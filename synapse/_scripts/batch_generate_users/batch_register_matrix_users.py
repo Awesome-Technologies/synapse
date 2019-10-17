@@ -278,7 +278,7 @@ def request_set_display_name( username, server_location, access_token, display_n
     return True
 
 
-def batch_register_new_users(file, server_location, admin_user, admin_password, no_dry_run, logo, _print=print, exit=sys.exit,):
+def batch_register_new_users(file, server_location, admin_user, admin_password, no_dry_run, logo, qr_only, _print=print, exit=sys.exit,):
 
     # login with admin user to gain access token
     _access_token = login(server_location, admin_user, admin_password)
@@ -325,7 +325,7 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
                 _user_id = '@' + _username + ':' + _servername
 
             res = {}
-            if no_dry_run:
+            if no_dry_run or qr_only:
                 res = request_registration(_username, _password, _display_name, server_location, _access_token, _is_admin, _user_type)
                 if res == False:    
                     _print("ERROR while registering user '" + row['first_name'], row['last_name'] + "'")
@@ -390,6 +390,12 @@ def main():
         " 'https://localhost:8448'.",
     )
 
+    parser.add_argument(
+        "--qr-only",
+        action="store_true",
+        help="Creates QR codes from users list without registering them at the server.",
+    )
+
     args = parser.parse_args()
 
     if not args.no_dry_run:
@@ -408,7 +414,7 @@ def main():
             print("Logo file does not exist.")
             sys.exit(1)
 
-    batch_register_new_users(args.file, args.server_url, args.user, args.password, args.no_dry_run, args.logo)
+    batch_register_new_users(args.file, args.server_url, args.user, args.password, args.no_dry_run, args.logo, args.qr_only)
 
 
 if __name__ == "__main__":

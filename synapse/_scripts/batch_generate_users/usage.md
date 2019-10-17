@@ -14,6 +14,9 @@ or
 
 	python3 batch_register_matrix_users.py -f <Path to CSV file> <Homeserver URL>
 	
+### QR code generation
+If the flag `--qr-only` is provided, the script will use the data from the csv file to generate the PDFs with QR codes and userlist without registering the useres at the server.
+
 ### Productive use
 
 	python3 batch_register_matrix_users.py -u <Admin username> -p <Admin password> -f <Path to CSV file> --no-dry-run <Homeserver URL>
