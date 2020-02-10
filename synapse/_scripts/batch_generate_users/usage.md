@@ -2,6 +2,8 @@
 
 	pip3 install pyyaml requests qrcode fpdf pillow
 	
+This script uses the Admin API v2 which was introduced with Synapse 1.8.0
+	
 ## Usage
 
 ### Dry run
@@ -13,9 +15,22 @@ It's recommended to perform a dry run first, to check if the given admin user ha
 or
 
 	python3 batch_register_matrix_users.py -f <Path to CSV file> <Homeserver URL>
-	
+
+The script will generate a folder named named after the homeserver url (with `.`
+ converted to `_`, eg. `https://matrix.example.org` will become `matrix_example_org`). Inside the folder two files will be created: Userlist.pdf and Userlist_QR.pdf. Additionaly a folder is created named "qr" where all the generated qr codes are saved, named with an increasing number that represents the position on the users list, followed by the displayname and the user id (eg. `002_John_Doe_c5g43rzy.png`). The folder structure looks like this:
+ 
+	.
+	+-- matrix_example_org
+	|   +-- Userlist.pdf
+	|   +-- Userlist_QR.pdf	
+	|   +-- qr
+	|   |   +-- 000_John_Doe_k3n2occp.png
+	|   |   +-- 001_Jane_Doe_is83n7fs.png
+	|   |   +-- 002_Jonny_Doe_p29c7skw.png
+	...	
+
 ### QR code generation
-If the flag `--qr-only` is provided, the script will use the data from the csv file to generate the PDFs with QR codes and userlist without registering the useres at the server.
+If the flag `--qr-only` is provided, the script will use the data from the csv file to generate the PDFs with QR codes and userlist without registering the users at the server.
 
 ### Productive use
 
