@@ -82,7 +82,8 @@ It returns a JSON body like the following:
                 "deactivated": 0
             }
         ],
-        "next_token": "100"
+        "next_token": "100",
+        "total": 200
     }
 
 
