@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 # Copyright 2018 New Vector
-# Copyright 2019 Awesome Technologies Innovationslabor GmbH
+# Copyright 2019, 2020 Awesome Technologies Innovationslabor GmbH
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,8 +37,10 @@ from fpdf import FPDF
 import os
 import base64
 import time
+import pathlib
+import re
 
-def sxor(s1,s2):    
+def sxor(s1,s2):
     # convert strings to a list of character pair tuples
     # go through each tuple, converting them to ASCII code (ord)
     # perform exclusive or on the ASCII code
@@ -91,10 +93,11 @@ def login(server_location, admin_user, admin_password, _print=print, requests=_r
         return False
 
     access_token = r.json()["access_token"]
+
     return access_token
 
 def request_registration(
-    user,
+    user_id,
     password,
     displayname,
     server_location,
@@ -106,20 +109,18 @@ def request_registration(
     exit=sys.exit,
 ):
 
-    url = "%s/_synapse/admin/v1/users?access_token=%s" % (server_location,access_token,)
+    url = "%s/_synapse/admin/v2/users/%s" % (server_location,user_id,)
 
     data = {
-        "username": user,
         "password": password,
         "displayname": displayname,
         "admin": admin,
-        "user_type": user_type,
     }
 
     _print("Sending registration request...")
-    r = requests.post(url, json=data, verify=False)
+    r = requests.put(url, headers={'Authorization': 'Bearer ' + access_token}, json=data, verify=False)
 
-    if r.status_code != 200:
+    if not (r.status_code == 200 or r.status_code == 201):
         _print("ERROR! Received %d %s" % (r.status_code, r.reason))
         if 400 <= r.status_code < 500:
             try:
@@ -131,7 +132,15 @@ def request_registration(
     return r
 
 
-def generate_pdf( user_list, server_location, no_dry_run, logo, _print=print,):
+def generate_pdf( user_list, server_location, no_dry_run, logo, qr_only, _print=print,):
+
+    folder = re.compile(r"https?://(www\.)?")
+    folder = folder.sub('', server_location).strip().strip('/')
+    folder = str(folder).replace('.', '_')
+
+    current_path = str(pathlib.Path(__file__).parent.absolute())
+    os.mkdir(current_path + '/' + folder)
+    os.mkdir(current_path + '/' + folder + '/qr')
 
     counter = 0
     pdf = FPDF('P', 'mm', 'A4')
@@ -167,46 +176,57 @@ def generate_pdf( user_list, server_location, no_dry_run, logo, _print=print,):
         qr.add_data(qrString)
         qr.make(fit=True)
 
+        # name qrs after their users
         img = qr.make_image(fill_color="black", back_color="white")
-        img.save("qr" + str(counter) + ".png","PNG")
+        qr_path = folder + "/qr/" + str(counter).zfill(3) + '_' + str(user[3] + ' ' + user[4]).replace(' ', '_') + '_' + user[0] + '.png'
+        img.save(qr_path,"PNG")
 
         # add pdf entry
-        if(counter % 4 == 0):
-            pdf.add_page()
 
-        start_y = 26.5 + (counter % 4) * 61
+        ## was for four entries on a page
+        ##if(counter % 4 == 0):
+        ##    pdf.add_page()
+        ##start_y = 26.5 + (counter % 4) * 61
 
-        pdf.set_font("Helvetica", size=7)
+        pdf.add_page()
+        start_y = 26.5
+
+        pdf.set_font('Helvetica', size=7)
         pdf.set_text_color(0, 0, 0)
-        
+
         pdf.text(15, start_y + 5, 'Awesome Technologies Innovationslabor GmbH, Rückertstr. 10, 97072 Würzburg')
 
-        pdf.set_font("Helvetica", size=22)
+        pdf.set_font('Helvetica', size=22)
         pdf.text(30, start_y + 25, user[3])
         pdf.text(30, start_y + 35, user[4])
 
-        pdf.set_font("Helvetica", size=12)
+        pdf.set_font('Helvetica', size=12)
         pdf.text(140, start_y + 7, 'Ihr persönlicher Anmeldecode:')
 
         pdf.image(_logo_file, x = 81, y = start_y + 15,
                     h = 30,
                     type = '', link = None)
-        pdf.image('qr' + str(counter) + '.png', x = 143, y = start_y + 10,
+        pdf.image(qr_path, x = 143, y = start_y + 10,
                     w = 50, h = 50,
                     type = '', link = None)
 
-        if not no_dry_run:
-            pdf.set_font("Helvetica", size=24)
+        pdf.set_font('Helvetica', size=24)
+        pdf.set_text_color(0, 0, 0)
+        #pdf.text(15, start_y + 80,  'Ihr persönlicher Benutzername:')
+        #pdf.text(15, start_y + 90,  'Ihr persönliches Passwort:')
+        pdf.text(15, start_y + 100, 'Ihre selbst gewählte Key-Backup-Passphrase:')
+        pdf.text(15, start_y + 120, '_____________________________________')
+
+        if not no_dry_run and not qr_only:
             pdf.set_text_color(220, 50, 50)
             pdf.text(75, start_y + 30, 'Credentials not valid !')
 
         counter += 1
 
-    pdf.output("Userlist_QR.pdf")
+    pdf.output(folder + '/Userlist_QR.pdf')
 
-    # delete qrs
-    for i in range(0, counter):
-        os.remove('qr' + str(i) + '.png')
+    # TODO delete qrs if setting is set
+    # os.remove(folder + '/qr')
 
     # second PDF with userlist
     pdf = FPDF('P', 'mm', 'A4')
@@ -214,68 +234,45 @@ def generate_pdf( user_list, server_location, no_dry_run, logo, _print=print,):
     pdf.set_font('Helvetica','',10.0)
     # Effective page width, or just epw
     epw = pdf.w - 2*pdf.l_margin
-    # Set column width to 1/4 of effective page width to distribute content 
+    # Set column width to 1/4 of effective page width to distribute content
     # evenly across table and page
     col_width = epw/3
 
     # Document title centered, 'B'old, 14 pt
-    pdf.set_font('Helvetica','B',14.0) 
+    pdf.set_font('Helvetica','B',14.0)
     pdf.cell(epw, 0.0, 'Users list for ' + server_location, align='C')
-    pdf.set_font('Helvetica','B',10.0) 
+    pdf.set_font('Helvetica','B',10.0)
     pdf.ln(5.5)
-     
+
     # Text height is the same as current font size
     th = pdf.font_size
 
     pdf.cell(col_width, 2*th, 'Displayname', border=1)
     pdf.cell(col_width, 2*th, 'Username', border=1)
     pdf.cell(col_width, 2*th, 'Password', border=1)
-    pdf.set_font('Helvetica','',10.0) 
+    pdf.set_font('Helvetica','',10.0)
     pdf.ln(2*th)
 
     for user in user_list:
         pdf.cell(col_width, 2*th, str(user[3] + ' ' + user[4]), border=1)
+        pdf.set_font('Courier','',10.0)
         pdf.cell(col_width, 2*th, str(user[0]), border=1)
         pdf.cell(col_width, 2*th, str(user[2]), border=1)
-        
+        pdf.set_font('Helvetica','',10.0)
+
         pdf.ln(2*th)
 
-    if not no_dry_run:
-        pdf.set_font("Helvetica", size=24)
+    if not no_dry_run and not qr_only:
+        pdf.set_font('Helvetica', size=24)
         pdf.set_text_color(220, 50, 50)
-        pdf.text(75, 60, 'Credentials not valid !')
+        pdf.text(75, 60,  'Credentials not valid !')
         pdf.text(75, 120, 'Credentials not valid !')
         pdf.text(75, 180, 'Credentials not valid !')
         pdf.text(75, 240, 'Credentials not valid !')
-         
-    pdf.output('Userlist.pdf','F')
 
-    return    
+    pdf.output(folder + '/Userlist.pdf','F')
 
-
-def request_set_display_name( username, server_location, access_token, display_name, requests=_requests,
-    _print=print):
-    # TODO
-    print("Setting display name for " + username + " to " + display_name)
-    url = "%s/_matrix/client/r0/profile/%s/displayname?access_token=%s" % (server_location,username,access_token,)
-
-    data = {
-        "displayname": display_name,
-    }
-
-    # Get the access token
-    r = requests.put(url, json=data, verify=False)
-
-    if r.status_code != 200:
-        _print("ERROR! Received %d %s" % (r.status_code, r.reason))
-        if 400 <= r.status_code < 500:
-            try:
-                _print(r.json()["error"])
-            except Exception:
-                pass
-        return False
-
-    return True
+    return
 
 
 def batch_register_new_users(file, server_location, admin_user, admin_password, no_dry_run, logo, qr_only, _print=print, exit=sys.exit,):
@@ -293,7 +290,7 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
     with open(file, newline='') as csvfile:
         reader = csv.DictReader(csvfile, delimiter=';')
         user_list = []
-        
+
         # loop through users
         for row in reader:
             _print("Registering '" + row['first_name'], row['last_name'] + "'")
@@ -325,22 +322,24 @@ def batch_register_new_users(file, server_location, admin_user, admin_password, 
                 _user_id = '@' + _username + ':' + _servername
 
             res = {}
-            if no_dry_run or qr_only:
-                res = request_registration(_username, _password, _display_name, server_location, _access_token, _is_admin, _user_type)
-                if res == False:    
+            if no_dry_run and not qr_only:
+                res = request_registration(_user_id, _password, _display_name, server_location, _access_token, _is_admin, _user_type)
+                if res == False:
                     _print("ERROR while registering user '" + row['first_name'], row['last_name'] + "'")
                     continue
+
             # user is guest
             if('user_id' in res and 'access_token' in res):
                 user_list.append(['', res.user_id, res.access_token, 'Gast', ''])
             else:
                 user_list.append([_username, _user_id, _password, row['first_name'], row['last_name']])
-                    
+
 
             # avoid Error 429 "Too Many Requests"
             time.sleep(3)
 
-        generate_pdf(user_list, server_location, no_dry_run, logo)
+        if len(user_list): # list is not empty
+            generate_pdf(user_list, server_location, no_dry_run, logo, qr_only)
 
 
 def main():
@@ -372,8 +371,8 @@ def main():
     parser.add_argument(
         "-l",
         "--logo",
-        default=None,
-        help="File to use as logo for the QR PDF",
+        default='logo.png',
+        help="File to use as logo for the QR PDF. Defaults to 'logo.png'",
     )
 
     parser.add_argument(
@@ -384,10 +383,9 @@ def main():
 
     parser.add_argument(
         "server_url",
-        default="https://localhost:8448",
+        default=None,
         nargs="?",
-        help="URL to use to talk to the home server. Defaults to "
-        " 'https://localhost:8448'.",
+        help="URL to use to talk to the home server.",
     )
 
     parser.add_argument(
@@ -413,6 +411,15 @@ def main():
         if not os.path.isfile(args.logo):
             print("Logo file does not exist.")
             sys.exit(1)
+
+    folder = re.compile(r"https?://(www\.)?")
+    folder = folder.sub('', args.server_url).strip().strip('/')
+    folder = str(folder).replace('.', '_')
+    current_path = str(pathlib.Path(__file__).parent.absolute())
+
+    if os.path.isdir(current_path + '/' + folder):
+        print("Registration files for " + args.server_url + " are already existing. Please move or delete them first.")
+        sys.exit(1)
 
     batch_register_new_users(args.file, args.server_url, args.user, args.password, args.no_dry_run, args.logo, args.qr_only)
 
