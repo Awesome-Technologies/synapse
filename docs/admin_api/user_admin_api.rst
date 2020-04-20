@@ -53,8 +53,8 @@ The api is::
 including an ``access_token`` of a server admin.
 The parameters ``from`` and ``limit`` are required only for pagination.
 By default, a ``limit`` of 100 is used.
-The parameter ``user_id`` can be used to select only users with user ids that
-contain this value.
+The parameter ``user_id`` can be used to select only users with user ids or
+display name that contain this value.
 The parameter ``guests=false`` can be used to exclude guest users,
 default is to include guest users.
 The parameter ``deactivated=true`` can be used to include deactivated users,
