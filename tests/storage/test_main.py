@@ -41,6 +41,11 @@ class DataStoreTestCase(unittest.TestCase):
         users, total = yield self.store.get_users_paginate(
             0, 10, name="bc", guests=False
         )
+        self.assertEquals(1, total)
+        self.assertEquals(self.displayname, users.pop()["displayname"])
 
+        users, total = yield self.store.get_users_paginate(
+            0, 10, name="ran", guests=False
+        )
         self.assertEquals(1, total)
         self.assertEquals(self.displayname, users.pop()["displayname"])
