@@ -92,7 +92,7 @@ class RoomCreateRestServlet(TransactionRestServlet):
         return self.txns.fetch_or_execute_request(request, self.on_POST, request)
 
     async def on_POST(self, request):
-        requester = await self.auth.get_user_by_req(request)
+        requester = await self.auth.get_user_by_req(request, allow_limited=False)
 
         info, _ = await self._room_creation_handler.create_room(
             requester, self.get_room_config(request)
@@ -351,7 +351,7 @@ class PublicRoomListRestServlet(TransactionRestServlet):
         server = parse_string(request, "server", default=None)
 
         try:
-            await self.auth.get_user_by_req(request, allow_guest=True)
+            await self.auth.get_user_by_req(request, allow_guest=True, allow_limited=False)
         except InvalidClientCredentialsError as e:
             # Option to allow servers to require auth when accessing
             # /publicRooms via CS API. This is especially helpful in private
@@ -392,7 +392,7 @@ class PublicRoomListRestServlet(TransactionRestServlet):
         return 200, data
 
     async def on_POST(self, request):
-        await self.auth.get_user_by_req(request, allow_guest=True)
+        await self.auth.get_user_by_req(request, allow_guest=True, allow_limited=False)
 
         server = parse_string(request, "server", default=None)
         content = parse_json_object_from_request(request)
@@ -924,7 +924,7 @@ class SearchRestServlet(RestServlet):
         self.auth = hs.get_auth()
 
     async def on_POST(self, request):
-        requester = await self.auth.get_user_by_req(request)
+        requester = await self.auth.get_user_by_req(request, allow_limited=False)
 
         content = parse_json_object_from_request(request)
 

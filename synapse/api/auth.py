@@ -163,6 +163,7 @@ class Auth:
         allow_guest: bool = False,
         rights: str = "access",
         allow_expired: bool = False,
+        allow_limited: bool = True,
     ) -> synapse.types.Requester:
         """ Get a registered user's ID.
 
@@ -174,6 +175,8 @@ class Auth:
             allow_expired: If True, allow the request through even if the account
                 is expired, or session token lifetime has ended. Note that
                 /login will deliver access tokens regardless of expiration.
+            allow_limited: If False, will raise an AuthError if the user making the
+                request is a limited user.
 
         Returns:
             Resolves to the requester
@@ -221,6 +224,17 @@ class Auth:
                 if await self.store.is_account_expired(user_id, self.clock.time_msec()):
                     raise AuthError(
                         403, "User account has expired", errcode=Codes.EXPIRED_ACCOUNT
+                    )
+
+            # Deny the request if the user is limited and access is forbidden for
+            # limited users
+            user_type = await self.get_user_type(user)
+            if user_type is not None and user_type == "limited":
+                if not allow_limited:
+                    raise AuthError(
+                        403,
+                        "Access not allowed for limited users",
+                        errcode=Codes.GUEST_ACCESS_FORBIDDEN,
                     )
 
             # device_id may not be present if get_user_by_access_token has been
@@ -518,6 +532,21 @@ class Auth:
             True if the user is an admin
         """
         return await self.store.is_server_admin(user)
+
+    async def get_user_type(self, user):
+        """ Returns the user_type of the given user.
+
+        Args:
+            user: user to check
+
+        Returns:
+            The user_type of the given user
+        """
+        user_info = await self.store.get_user_by_id(user.to_string())
+        if user_info and user_info["user_type"]:
+            return user_info["user_type"]
+        else:
+            return None
 
     def compute_auth_events(
         self, event, current_state_ids: StateMap[str], for_verification: bool = False,

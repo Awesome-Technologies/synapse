@@ -261,7 +261,7 @@ class HomeserverTestCase(TestCase):
                         "is_guest": False,
                     }
 
-                async def get_user_by_req(request, allow_guest=False, rights="access"):
+                async def get_user_by_req(request, allow_guest=False, rights="access", allow_limited=True):
                     return create_requester(
                         UserID.from_string(self.helper.auth_user_id),
                         1,

@@ -122,7 +122,9 @@ class UserTypes:
 
     SUPPORT = "support"
     BOT = "bot"
-    ALL_USER_TYPES = (SUPPORT, BOT)
+    FREE = "free"
+    LIMITED = "limited"
+    ALL_USER_TYPES = (SUPPORT, BOT, FREE, LIMITED)
 
 
 class RelationTypes:

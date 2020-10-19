@@ -72,6 +72,10 @@ class AuthTestCase(unittest.TestCase):
             return_value=defer.succeed(user_info)
         )
 
+        self.store.get_user_by_id = Mock(
+            return_value=defer.succeed({"is_guest": False, "user_type": None})
+        )
+
         request = Mock(args={})
         request.args[b"access_token"] = [self.test_token]
         request.requestHeaders.getRawHeaders = mock_getRawHeaders()
@@ -305,7 +309,7 @@ class AuthTestCase(unittest.TestCase):
 
         self.store.get_user_by_access_token = get_user
         self.store.get_user_by_id = Mock(
-            return_value=defer.succeed({"is_guest": False})
+            return_value=defer.succeed({"is_guest": False, "user_type": None})
         )
 
         # check the token works

@@ -53,7 +53,7 @@ class UserDirectorySearchRestServlet(RestServlet):
                     ]
                 }
         """
-        requester = await self.auth.get_user_by_req(request, allow_guest=False)
+        requester = await self.auth.get_user_by_req(request, allow_guest=False, allow_limited=False)
         user_id = requester.user.to_string()
 
         if not self.hs.config.user_directory_search_enabled:
