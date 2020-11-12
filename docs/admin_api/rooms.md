@@ -323,6 +323,37 @@ Response:
 }
 ```
 
+# Change Room API
+
+The Change Room admin API allows server admins to invite members
+to arbitrary (local) rooms and to set power levels of room members.
+
+## Usage
+
+A standard request:
+
+```
+POST /_synapse/admin/v1/rooms/<room_id>
+
+{
+  "invitees": ["@foo:matrix.org", "@bar:matrix.org"],
+  "member_roles": [
+    {
+      "member_id": "@foo:matrix.org",
+      "power_level": 0
+    },
+    {
+      "member_id": "@foobar:matrix.org",
+      "power_level": 100
+    }
+  ]
+}
+```
+
+All parameters (`invitees` and `member_roles`)  are optional
+
+Response: empty `""`
+
 # Room Members API
 
 The Room Members admin API allows server admins to get a list of all members of a room.
@@ -354,6 +385,34 @@ Response:
   "total": 3
 }
 ```
+
+# Create Room API
+
+The Create Room admin API allows server admins to create new rooms on the server.
+It is possible to specify an owner for the room other than the requester himself.
+In that case, the server admin, who made the request **does not** become a member
+of the created room.
+
+The API is:
+
+```json
+POST /_synapse/admin/v1/rooms
+```
+
+the body parameters are the same as in
+<https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom>
+with one additional optional parameter
+```json
+{
+    "owner": "@someuser:example.com"
+}
+```
+
+To use it, you will need to authenticate by providing an ``access_token`` for a
+server admin: see [README.rst](README.rst).
+
+The response body is identical to the one of
+<https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom>
 
 # Delete Room API
 

@@ -575,6 +575,10 @@ class RoomCreationHandler(BaseHandler):
                 values to go in the body of the 'join' event (typically
                 `avatar_url` and/or `displayname`.
 
+            owner:
+                An owner for the new room. If None -> requester will be used.
+                Can only be set if requester is server admin.
+
         Returns:
                 First, a dict containing the keys `room_id` and, if an alias
                 was, requested, `room_alias`. Secondly, the stream_id of the
@@ -597,6 +601,11 @@ class RoomCreationHandler(BaseHandler):
             is_requester_admin = True
         else:
             is_requester_admin = await self.auth.is_server_admin(requester.user)
+
+        if ("owner" in config) and is_requester_admin:
+            owner = UserID.from_string(config["owner"])
+        else:
+            owner = requester.user
 
         # Check whether the third party rules allows/changes the room create
         # request.
@@ -726,6 +735,7 @@ class RoomCreationHandler(BaseHandler):
             room_alias=room_alias,
             power_level_content_override=power_level_content_override,
             creator_join_profile=creator_join_profile,
+            owner=owner
         )
 
         if "name" in config:
@@ -819,6 +829,7 @@ class RoomCreationHandler(BaseHandler):
         invite_list: List[str],
         initial_state: MutableStateMap,
         creation_content: JsonDict,
+        owner: UserID,
         room_alias: Optional[RoomAlias] = None,
         power_level_content_override: Optional[JsonDict] = None,
         creator_join_profile: Optional[JsonDict] = None,
@@ -833,6 +844,7 @@ class RoomCreationHandler(BaseHandler):
         """
 
         creator_id = creator.user.to_string()
+        owner_id = owner.to_string()
 
         event_keys = {"room_id": room_id, "sender": creator_id, "state_key": ""}
 
@@ -865,7 +877,7 @@ class RoomCreationHandler(BaseHandler):
         logger.debug("Sending %s in new room", EventTypes.Member)
         await self.room_member_handler.update_membership(
             creator,
-            creator.user,
+            owner,
             room_id,
             "join",
             ratelimit=False,
@@ -881,7 +893,7 @@ class RoomCreationHandler(BaseHandler):
             )
         else:
             power_level_content = {
-                "users": {creator_id: 100},
+                "users": {owner_id: 100},
                 "users_default": 0,
                 "events": {
                     EventTypes.Name: 50,

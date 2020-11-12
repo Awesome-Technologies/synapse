@@ -90,9 +90,26 @@ class Auth:
         auth_events = {(e.type, e.state_key): e for e in auth_events.values()}
 
         room_version_obj = KNOWN_ROOM_VERSIONS[room_version]
-        event_auth.check(
-            room_version_obj, event, auth_events=auth_events, do_sig_check=do_sig_check
-        )
+
+        # Allow server admin to change room configuration
+        if (
+            event.type in [
+                EventTypes.PowerLevels,
+                EventTypes.JoinRules,
+                EventTypes.RoomHistoryVisibility,
+                EventTypes.GuestAccess,
+                EventTypes.RoomEncryption,
+                EventTypes.Name,
+                EventTypes.Member,
+                EventTypes.CanonicalAlias
+            ] and
+            self.is_server_admin(event.user_id)
+        ):
+            logger.debug("Allowing! %s", event)
+        else:
+            event_auth.check(
+                room_version_obj, event, auth_events=auth_events, do_sig_check=do_sig_check
+            )
 
     async def check_user_in_room(
         self,

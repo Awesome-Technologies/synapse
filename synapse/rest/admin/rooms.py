@@ -15,6 +15,7 @@
 import logging
 from http import HTTPStatus
 from typing import List, Optional
+from copy import deepcopy
 
 from synapse.api.constants import EventTypes, JoinRules
 from synapse.api.errors import Codes, NotFoundError, SynapseError
@@ -33,9 +34,9 @@ from synapse.rest.admin._base import (
 )
 from synapse.storage.databases.main.room import RoomSortOrder
 from synapse.types import RoomAlias, RoomID, UserID, create_requester
+from synapse.logging.opentracing import set_tag
 
 logger = logging.getLogger(__name__)
-
 
 class ShutdownRoomRestServlet(RestServlet):
     """Shuts down a room by removing all local users from the room and blocking
@@ -127,19 +128,19 @@ class DeleteRoomRestServlet(RestServlet):
         return (200, ret)
 
 
-class ListRoomRestServlet(RestServlet):
-    """
-    List all rooms that are known to the homeserver. Results are returned
-    in a dictionary containing room information. Supports pagination.
-    """
-
+class RoomsRestServlet(RestServlet):
     PATTERNS = admin_patterns("/rooms$")
 
     def __init__(self, hs):
         self.store = hs.get_datastore()
         self.auth = hs.get_auth()
         self.admin_handler = hs.get_handlers().admin_handler
+        self._room_creation_handler = hs.get_room_creation_handler()
 
+    """
+    List all rooms that are known to the homeserver. Results are returned
+    in a dictionary containing room information. Supports pagination.
+    """
     async def on_GET(self, request):
         requester = await self.auth.get_user_by_req(request)
         await assert_user_is_admin(self.auth, requester.user)
@@ -216,11 +217,24 @@ class ListRoomRestServlet(RestServlet):
 
         return 200, response
 
+    """
+    Create a new room. It is possible to set an explicit
+    owner other than the requester. In this case
+    the requester does not become member of the room.
+    """
+    async def on_POST(self, request):
+        requester = await self.auth.get_user_by_req(request, allow_limited=False)
+        await assert_user_is_admin(self.auth, requester.user)
+
+        content = parse_json_object_from_request(request)
+
+        info, _ = await self._room_creation_handler.create_room(requester, content)
+
+        return 200, info
+
 
 class RoomRestServlet(RestServlet):
     """Get room details.
-
-    TODO: Add on_POST to allow room creation without joining the room
     """
 
     PATTERNS = admin_patterns("/rooms/(?P<room_id>[^/]+)$")
@@ -229,6 +243,9 @@ class RoomRestServlet(RestServlet):
         self.hs = hs
         self.auth = hs.get_auth()
         self.store = hs.get_datastore()
+        self.room_member_handler = hs.get_room_member_handler()
+        self.event_creation_handler = hs.get_event_creation_handler()
+        self.state = hs.get_state_handler()
 
     async def on_GET(self, request, room_id):
         await assert_requester_is_admin(self.auth, request)
@@ -239,6 +256,53 @@ class RoomRestServlet(RestServlet):
 
         return 200, ret
 
+    async def on_PUT(self, request, room_id):
+        await assert_requester_is_admin(self.auth, request)
+        requester = await self.auth.get_user_by_req(request)
+
+        content = parse_json_object_from_request(request)
+
+        if "invitees" in content:
+            for invitee in content["invitees"]:
+                target_user = UserID.from_string(invitee)
+                await self.room_member_handler.update_membership(
+                    requester=requester,
+                    target=target_user,
+                    room_id=room_id,
+                    action="invite",
+                    ratelimit=False,
+                )
+
+        if "member_roles" in content:
+            room_data = await self.state.get_current_state(
+                room_id=room_id,
+                event_type=EventTypes.PowerLevels,
+                state_key=""
+            )
+
+            event_content = deepcopy(room_data.get("content"))
+
+            for member in content["member_roles"]:
+                event_content["users"][member["member_id"]] = member["power_level"];
+
+            event = {
+                "room_id": room_id,
+                "sender": requester.user.to_string(),
+                "state_key": "",
+                "type": EventTypes.PowerLevels,
+                "content": event_content
+            }
+
+            (
+                event,
+                _,
+            ) = await self.event_creation_handler.create_and_send_nonmember_event(
+                requester, event, ratelimit=False, ignore_shadow_ban=True,
+            )
+
+            set_tag("event_id", event.event_id)
+
+        return 200, ""
 
 class RoomMembersRestServlet(RestServlet):
     """
