@@ -402,3 +402,52 @@ class JoinRoomAliasServlet(RestServlet):
         )
 
         return 200, {"room_id": room_id}
+
+
+class PowerLevelsRestServlet(RestServlet):
+    """
+    Get power levels for members of a room.
+    """
+
+    PATTERNS = admin_patterns("/rooms/(?P<room_id>[^/]+)/power_levels")
+
+    def __init__(self, hs):
+        self.hs = hs
+        self.auth = hs.get_auth()
+        self.store = hs.get_datastore()
+        self.state = hs.get_state_handler()
+
+    async def on_GET(self, request, room_id):
+        await assert_requester_is_admin(self.auth, request)
+        requester = await self.auth.get_user_by_req(request)
+
+        ret = await self.store.get_room(room_id)
+        if not ret:
+            raise NotFoundError("Room not found")
+
+        members = await self.store.get_users_in_room(room_id)
+
+        room_data = await self.state.get_current_state(
+            room_id=room_id,
+            event_type=EventTypes.PowerLevels,
+            state_key=""
+        )
+
+        content = room_data.get("content")
+
+        ret = {
+            "members": [
+                {
+                    "user_id": member,
+                    "power_level": content["users"][member]
+                        if member in content["users"]
+                        else content["users_default"]
+                            if "users_default" in content else 0
+                }
+                for member
+                in members
+            ],
+            "total": len(members)
+        }
+
+        return 200, ret

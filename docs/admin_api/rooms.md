@@ -380,8 +380,40 @@ Response:
   "members": [
     "@foo:matrix.org",
     "@bar:matrix.org",
-    "@foobar:matrix.org
-    ],
+    "@foobar:matrix.org"
+  ],
+  "total": 3
+}
+```
+
+# Power Levels API
+
+The Power Levels admin API allows server admins to get a list of power levels for all members of a room.
+
+The response includes the following fields:
+
+* `members` - A list of JSON objects containing `user_id` and `power_level` of all members of the room.
+* `total` - Total number of members in the room.
+
+## Usage
+
+A standard request:
+
+```
+GET /_synapse/admin/v1/rooms/<room_id>/power_levels
+
+{}
+```
+
+Response:
+
+```
+{
+  "members": [
+    { "user_id": "@foo:matrix.org", "power_level": 0 },
+    { "user_id": "@bar:matrix.org", "power_level": 50 },
+    { "user_id": "@foobar:matrix.org", "power_level": 100 }
+  ],
   "total": 3
 }
 ```
