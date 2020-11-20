@@ -610,6 +610,26 @@ class RoomTestCase(unittest.HomeserverTestCase):
         self.admin_user = self.register_user("admin", "pass", admin=True)
         self.admin_user_tok = self.login("admin", "pass")
 
+        self.user_1 = self.register_user("foo", "pass")
+
+    def test_create_room(self):
+        """Test that an admin can create a room for someone else"""
+        url = "/_synapse/admin/v1/rooms"
+        request, channel = self.make_request(
+            "POST",
+            url.encode("ascii"),
+            {"owner": self.user_1},
+            access_token=self.admin_user_tok,
+        )
+
+        # Check request completed successfully
+        self.assertEqual(200, int(channel.code), msg=channel.json_body)
+
+        users_in_room = self.get_success(
+            self.store.get_users_in_room(channel.json_body["room_id"])
+        )
+        self.assertEqual([self.user_1], users_in_room)
+
     def test_list_rooms(self):
         """Test that we can list rooms"""
         # Create 3 test rooms
@@ -1103,9 +1123,8 @@ class RoomTestCase(unittest.HomeserverTestCase):
         room_id_2 = self.helper.create_room_as(self.admin_user, tok=self.admin_user_tok)
 
         # Have another user join the room
-        user_1 = self.register_user("foo", "pass")
         user_tok_1 = self.login("foo", "pass")
-        self.helper.join(room_id_1, user_1, tok=user_tok_1)
+        self.helper.join(room_id_1, self.user_1, tok=user_tok_1)
 
         # Have another user join the room
         user_2 = self.register_user("bar", "pass")

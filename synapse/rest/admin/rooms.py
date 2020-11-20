@@ -127,18 +127,19 @@ class DeleteRoomRestServlet(RestServlet):
         return (200, ret)
 
 
-class ListRoomRestServlet(RestServlet):
-    """
-    List all rooms that are known to the homeserver. Results are returned
-    in a dictionary containing room information. Supports pagination.
-    """
-
+class RoomsRestServlet(RestServlet):
     PATTERNS = admin_patterns("/rooms$")
 
     def __init__(self, hs):
         self.store = hs.get_datastore()
         self.auth = hs.get_auth()
         self.admin_handler = hs.get_admin_handler()
+        self.room_creation_handler = hs.get_room_creation_handler()
+
+    """
+    List all rooms that are known to the homeserver. Results are returned
+    in a dictionary containing room information. Supports pagination.
+    """
 
     async def on_GET(self, request):
         requester = await self.auth.get_user_by_req(request)
@@ -216,11 +217,24 @@ class ListRoomRestServlet(RestServlet):
 
         return 200, response
 
+    """
+    Create a new room. It is possible to set an explicit
+    owner other than the requester. In this case
+    the requester does not become member of the room.
+    """
+
+    async def on_POST(self, request):
+        requester = await self.auth.get_user_by_req(request)
+        await assert_user_is_admin(self.auth, requester.user)
+
+        content = parse_json_object_from_request(request)
+        response, _ = await self.room_creation_handler.create_room(requester, content)
+
+        return 200, response
+
 
 class RoomRestServlet(RestServlet):
     """Get room details.
-
-    TODO: Add on_POST to allow room creation without joining the room
     """
 
     PATTERNS = admin_patterns("/rooms/(?P<room_id>[^/]+)$")
