@@ -28,6 +28,10 @@ class RoomCreationRules:
     def __init__(self, config, http_client):
         self.http_client = http_client
 
+    @staticmethod
+    def parse_config(config):
+        return config
+
     async def check_event_allowed(
         self, event: EventBase, context: EventContext
     ) -> bool:
