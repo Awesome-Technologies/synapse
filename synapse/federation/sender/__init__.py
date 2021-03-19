@@ -40,7 +40,7 @@ from synapse.metrics import (
     events_processed_counter,
 )
 from synapse.metrics.background_process_metrics import run_as_background_process
-from synapse.types import ReadReceipt
+from synapse.types import ReadReceipt, RoomStreamToken
 from synapse.util.metrics import Measure, measure_func
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,8 @@ class FederationSender:
             self._wake_destinations_needing_catchup,
         )
 
+        self._external_cache = hs.get_external_cache()
+
     def _get_per_destination_queue(self, destination: str) -> PerDestinationQueue:
         """Get or create a PerDestinationQueue for the given destination
 
@@ -154,10 +156,15 @@ class FederationSender:
             self._per_destination_queues[destination] = queue
         return queue
 
-    def notify_new_events(self, current_id: int) -> None:
+    def notify_new_events(self, max_token: RoomStreamToken) -> None:
         """This gets called when we have some new events we might want to
         send out to other servers.
         """
+        # We just use the minimum stream ordering and ignore the vector clock
+        # component. This is safe to do as long as we *always* ignore the vector
+        # clock components.
+        current_id = max_token.stream
+
         self._last_poked_id = max(current_id, self._last_poked_id)
 
         if self._is_processing:
@@ -192,22 +199,40 @@ class FederationSender:
                     if not event.internal_metadata.should_proactively_send():
                         return
 
-                    try:
-                        # Get the state from before the event.
-                        # We need to make sure that this is the state from before
-                        # the event and not from after it.
-                        # Otherwise if the last member on a server in a room is
-                        # banned then it won't receive the event because it won't
-                        # be in the room after the ban.
-                        destinations = await self.state.get_hosts_in_room_at_events(
-                            event.room_id, event_ids=event.prev_event_ids()
+                    destinations = None  # type: Optional[Set[str]]
+                    if not event.prev_event_ids():
+                        # If there are no prev event IDs then the state is empty
+                        # and so no remote servers in the room
+                        destinations = set()
+                    else:
+                        # We check the external cache for the destinations, which is
+                        # stored per state group.
+
+                        sg = await self._external_cache.get(
+                            "event_to_prev_state_group", event.event_id
                         )
-                    except Exception:
-                        logger.exception(
-                            "Failed to calculate hosts in room for event: %s",
-                            event.event_id,
-                        )
-                        return
+                        if sg:
+                            destinations = await self._external_cache.get(
+                                "get_joined_hosts", str(sg)
+                            )
+
+                    if destinations is None:
+                        try:
+                            # Get the state from before the event.
+                            # We need to make sure that this is the state from before
+                            # the event and not from after it.
+                            # Otherwise if the last member on a server in a room is
+                            # banned then it won't receive the event because it won't
+                            # be in the room after the ban.
+                            destinations = await self.state.get_hosts_in_room_at_events(
+                                event.room_id, event_ids=event.prev_event_ids()
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to calculate hosts in room for event: %s",
+                                event.event_id,
+                            )
+                            return
 
                     destinations = {
                         d
@@ -297,11 +322,15 @@ class FederationSender:
         sent_pdus_destination_dist_total.inc(len(destinations))
         sent_pdus_destination_dist_count.inc()
 
+        assert pdu.internal_metadata.stream_ordering
+
         # track the fact that we have a PDU for these destinations,
         # to allow us to perform catch-up later on if the remote is unreachable
         # for a while.
         await self.store.store_destination_rooms_entries(
-            destinations, pdu.room_id, pdu.internal_metadata.stream_ordering,
+            destinations,
+            pdu.room_id,
+            pdu.internal_metadata.stream_ordering,
         )
 
         for destination in destinations:
@@ -445,10 +474,10 @@ class FederationSender:
             self._processing_pending_presence = False
 
     def send_presence_to_destinations(
-        self, states: List[UserPresenceState], destinations: List[str]
+        self, states: Iterable[UserPresenceState], destinations: Iterable[str]
     ) -> None:
         """Send the given presence states to the given destinations.
-            destinations (list[str])
+        destinations (list[str])
         """
 
         if not states or not self.hs.config.use_presence:
@@ -589,8 +618,8 @@ class FederationSender:
         last_processed = None  # type: Optional[str]
 
         while True:
-            destinations_to_wake = await self.store.get_catch_up_outstanding_destinations(
-                last_processed
+            destinations_to_wake = (
+                await self.store.get_catch_up_outstanding_destinations(last_processed)
             )
 
             if not destinations_to_wake:

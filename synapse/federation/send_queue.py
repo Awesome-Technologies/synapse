@@ -188,7 +188,7 @@ class FederationRemoteSendQueue:
             for key in keys[:i]:
                 del self.edus[key]
 
-    def notify_new_events(self, current_id):
+    def notify_new_events(self, max_token):
         """As per FederationSender"""
         # We don't need to replicate this as it gets sent down a different
         # stream.
@@ -468,8 +468,7 @@ class KeyedEduRow(
 
 
 class EduRow(BaseFederationRow, namedtuple("EduRow", ("edu",))):  # Edu
-    """Streams EDUs that don't have keys. See KeyedEduRow
-    """
+    """Streams EDUs that don't have keys. See KeyedEduRow"""
 
     TypeId = "e"
 
@@ -519,7 +518,10 @@ def process_rows_for_federation(transaction_queue, rows):
     # them into the appropriate collection and then send them off.
 
     buff = ParsedFederationStreamData(
-        presence=[], presence_destinations=[], keyed_edus={}, edus={},
+        presence=[],
+        presence_destinations=[],
+        keyed_edus={},
+        edus={},
     )
 
     # Parse the rows in the stream and add to the buffer

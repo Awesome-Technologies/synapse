@@ -183,7 +183,10 @@ class Stream:
             return [], upto_token, False
 
         updates, upto_token, limited = await self.update_function(
-            instance_name, from_token, upto_token, _STREAM_UPDATE_TARGET_ROW_COUNT,
+            instance_name,
+            from_token,
+            upto_token,
+            _STREAM_UPDATE_TARGET_ROW_COUNT,
         )
         return updates, upto_token, limited
 
@@ -240,12 +243,17 @@ class BackfillStream(Stream):
     ROW_TYPE = BackfillStreamRow
 
     def __init__(self, hs):
-        store = hs.get_datastore()
+        self.store = hs.get_datastore()
         super().__init__(
             hs.get_instance_name(),
-            current_token_without_instance(store.get_current_backfill_token),
-            store.get_all_new_backfill_event_rows,
+            self._current_token,
+            self.store.get_all_new_backfill_event_rows,
         )
+
+    def _current_token(self, instance_name: str) -> int:
+        # The backfill stream over replication operates on *positive* numbers,
+        # which means we need to negate it.
+        return -self.store._backfill_id_gen.get_current_token_for_writer(instance_name)
 
 
 class PresenceStream(Stream):
@@ -334,8 +342,7 @@ class ReceiptsStream(Stream):
 
 
 class PushRulesStream(Stream):
-    """A user has changed their push rules
-    """
+    """A user has changed their push rules"""
 
     PushRulesStreamRow = namedtuple("PushRulesStreamRow", ("user_id",))  # str
 
@@ -357,8 +364,7 @@ class PushRulesStream(Stream):
 
 
 class PushersStream(Stream):
-    """A user has added/changed/removed a pusher
-    """
+    """A user has added/changed/removed a pusher"""
 
     PushersStreamRow = namedtuple(
         "PushersStreamRow",
@@ -411,8 +417,7 @@ class CachesStream(Stream):
 
 
 class PublicRoomsStream(Stream):
-    """The public rooms list changed
-    """
+    """The public rooms list changed"""
 
     PublicRoomsStreamRow = namedtuple(
         "PublicRoomsStreamRow",
@@ -458,8 +463,7 @@ class DeviceListsStream(Stream):
 
 
 class ToDeviceStream(Stream):
-    """New to_device messages for a client
-    """
+    """New to_device messages for a client"""
 
     ToDeviceStreamRow = namedtuple("ToDeviceStreamRow", ("entity",))  # str
 
@@ -476,8 +480,7 @@ class ToDeviceStream(Stream):
 
 
 class TagAccountDataStream(Stream):
-    """Someone added/removed a tag for a room
-    """
+    """Someone added/removed a tag for a room"""
 
     TagAccountDataStreamRow = namedtuple(
         "TagAccountDataStreamRow", ("user_id", "room_id", "data")  # str  # str  # dict
@@ -496,11 +499,10 @@ class TagAccountDataStream(Stream):
 
 
 class AccountDataStream(Stream):
-    """Global or per room account data was changed
-    """
+    """Global or per room account data was changed"""
 
     AccountDataStreamRow = namedtuple(
-        "AccountDataStream",
+        "AccountDataStreamRow",
         ("user_id", "room_id", "data_type"),  # str  # Optional[str]  # str
     )
 
@@ -584,8 +586,7 @@ class GroupServerStream(Stream):
 
 
 class UserSignatureStream(Stream):
-    """A user has signed their own device with their user-signing key
-    """
+    """A user has signed their own device with their user-signing key"""
 
     UserSignatureStreamRow = namedtuple("UserSignatureStreamRow", ("user_id"))  # str
 

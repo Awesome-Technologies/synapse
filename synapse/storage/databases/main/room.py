@@ -16,7 +16,6 @@
 
 import collections
 import logging
-import re
 from abc import abstractmethod
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,6 +29,7 @@ from synapse.storage.databases.main.search import SearchStore
 from synapse.types import JsonDict, ThirdPartyInstanceID
 from synapse.util import json_encoder
 from synapse.util.caches.descriptors import cached
+from synapse.util.stringutils import MXC_REGEX
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class RoomWorkerStore(SQLBaseStore):
         return await self.db_pool.simple_select_one(
             table="rooms",
             keyvalues={"room_id": room_id},
-            retcols=("room_id", "is_public", "creator"),
+            retcols=("room_id", "is_public", "creator", "has_auth_chain_index"),
             desc="get_room",
             allow_none=True,
         )
@@ -191,6 +191,17 @@ class RoomWorkerStore(SQLBaseStore):
         return await self.db_pool.runInteraction(
             "count_public_rooms", _count_public_rooms_txn
         )
+
+    async def get_room_count(self) -> int:
+        """Retrieve the total number of rooms."""
+
+        def f(txn):
+            sql = "SELECT count(*)  FROM rooms"
+            txn.execute(sql)
+            row = txn.fetchone()
+            return row[0] or 0
+
+        return await self.db_pool.runInteraction("get_rooms", f)
 
     async def get_largest_public_rooms(
         self,
@@ -367,14 +378,14 @@ class RoomWorkerStore(SQLBaseStore):
         # Filter room names by a string
         where_statement = ""
         if search_term:
-            where_statement = "WHERE state.name LIKE ?"
+            where_statement = "WHERE LOWER(state.name) LIKE ?"
 
             # Our postgres db driver converts ? -> %s in SQL strings as that's the
             # placeholder for postgres.
             # HOWEVER, if you put a % into your SQL then everything goes wibbly.
             # To get around this, we're going to surround search_term with %'s
             # before giving it to the database in python instead
-            search_term = "%" + search_term + "%"
+            search_term = "%" + search_term.lower() + "%"
 
         # Set ordering
         if RoomSortOrder(order_by) == RoomSortOrder.SIZE:
@@ -505,7 +516,8 @@ class RoomWorkerStore(SQLBaseStore):
             return rooms, room_count[0]
 
         return await self.db_pool.runInteraction(
-            "get_rooms_paginate", _get_rooms_paginate_txn,
+            "get_rooms_paginate",
+            _get_rooms_paginate_txn,
         )
 
     @cached(max_entries=10000)
@@ -566,7 +578,8 @@ class RoomWorkerStore(SQLBaseStore):
             return self.db_pool.cursor_to_dict(txn)
 
         ret = await self.db_pool.runInteraction(
-            "get_retention_policy_for_room", get_retention_policy_for_room_txn,
+            "get_retention_policy_for_room",
+            get_retention_policy_for_room_txn,
         )
 
         # If we don't know this room ID, ret will be None, in this case return the default
@@ -648,8 +661,6 @@ class RoomWorkerStore(SQLBaseStore):
             The local and remote media as a lists of tuples where the key is
             the hostname and the value is the media ID.
         """
-        mxc_re = re.compile("^mxc://([^/]+)/([^/#?]+)")
-
         sql = """
             SELECT stream_ordering, json FROM events
             JOIN event_json USING (room_id, event_id)
@@ -676,7 +687,7 @@ class RoomWorkerStore(SQLBaseStore):
                 for url in (content_url, thumbnail_url):
                     if not url:
                         continue
-                    matches = mxc_re.match(url)
+                    matches = MXC_REGEX.match(url)
                     if matches:
                         hostname = matches.group(1)
                         media_id = matches.group(2)
@@ -697,7 +708,10 @@ class RoomWorkerStore(SQLBaseStore):
         return local_media_mxcs, remote_media_mxcs
 
     async def quarantine_media_by_id(
-        self, server_name: str, media_id: str, quarantined_by: str,
+        self,
+        server_name: str,
+        media_id: str,
+        quarantined_by: str,
     ) -> int:
         """quarantines a single local or remote media id
 
@@ -857,6 +871,89 @@ class RoomWorkerStore(SQLBaseStore):
             "get_all_new_public_rooms", get_all_new_public_rooms
         )
 
+    async def get_rooms_for_retention_period_in_range(
+        self, min_ms: Optional[int], max_ms: Optional[int], include_null: bool = False
+    ) -> Dict[str, dict]:
+        """Retrieves all of the rooms within the given retention range.
+
+        Optionally includes the rooms which don't have a retention policy.
+
+        Args:
+            min_ms: Duration in milliseconds that define the lower limit of
+                the range to handle (exclusive). If None, doesn't set a lower limit.
+            max_ms: Duration in milliseconds that define the upper limit of
+                the range to handle (inclusive). If None, doesn't set an upper limit.
+            include_null: Whether to include rooms which retention policy is NULL
+                in the returned set.
+
+        Returns:
+            The rooms within this range, along with their retention
+            policy. The key is "room_id", and maps to a dict describing the retention
+            policy associated with this room ID. The keys for this nested dict are
+            "min_lifetime" (int|None), and "max_lifetime" (int|None).
+        """
+
+        def get_rooms_for_retention_period_in_range_txn(txn):
+            range_conditions = []
+            args = []
+
+            if min_ms is not None:
+                range_conditions.append("max_lifetime > ?")
+                args.append(min_ms)
+
+            if max_ms is not None:
+                range_conditions.append("max_lifetime <= ?")
+                args.append(max_ms)
+
+            # Do a first query which will retrieve the rooms that have a retention policy
+            # in their current state.
+            sql = """
+                SELECT room_id, min_lifetime, max_lifetime FROM room_retention
+                INNER JOIN current_state_events USING (event_id, room_id)
+                """
+
+            if len(range_conditions):
+                sql += " WHERE (" + " AND ".join(range_conditions) + ")"
+
+                if include_null:
+                    sql += " OR max_lifetime IS NULL"
+
+            txn.execute(sql, args)
+
+            rows = self.db_pool.cursor_to_dict(txn)
+            rooms_dict = {}
+
+            for row in rows:
+                rooms_dict[row["room_id"]] = {
+                    "min_lifetime": row["min_lifetime"],
+                    "max_lifetime": row["max_lifetime"],
+                }
+
+            if include_null:
+                # If required, do a second query that retrieves all of the rooms we know
+                # of so we can handle rooms with no retention policy.
+                sql = "SELECT DISTINCT room_id FROM current_state_events"
+
+                txn.execute(sql)
+
+                rows = self.db_pool.cursor_to_dict(txn)
+
+                # If a room isn't already in the dict (i.e. it doesn't have a retention
+                # policy in its state), add it with a null policy.
+                for row in rows:
+                    if row["room_id"] not in rooms_dict:
+                        rooms_dict[row["room_id"]] = {
+                            "min_lifetime": None,
+                            "max_lifetime": None,
+                        }
+
+            return rooms_dict
+
+        return await self.db_pool.runInteraction(
+            "get_rooms_for_retention_period_in_range",
+            get_rooms_for_retention_period_in_range_txn,
+        )
+
 
 class RoomBackgroundUpdateStore(SQLBaseStore):
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
@@ -868,7 +965,8 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
         self.config = hs.config
 
         self.db_pool.updates.register_background_update_handler(
-            "insert_room_retention", self._background_insert_retention,
+            "insert_room_retention",
+            self._background_insert_retention,
         )
 
         self.db_pool.updates.register_background_update_handler(
@@ -940,7 +1038,8 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
                 return False
 
         end = await self.db_pool.runInteraction(
-            "insert_room_retention", _background_insert_retention_txn,
+            "insert_room_retention",
+            _background_insert_retention_txn,
         )
 
         if end:
@@ -951,7 +1050,7 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
     async def _background_add_rooms_room_version_column(
         self, progress: dict, batch_size: int
     ):
-        """Background update to go and add room version inforamtion to `rooms`
+        """Background update to go and add room version information to `rooms`
         table from `current_state_events` table.
         """
 
@@ -1071,6 +1170,37 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
         # It's overridden by RoomStore for the synapse master.
         raise NotImplementedError()
 
+    async def has_auth_chain_index(self, room_id: str) -> bool:
+        """Check if the room has (or can have) a chain cover index.
+
+        Defaults to True if we don't have an entry in `rooms` table nor any
+        events for the room.
+        """
+
+        has_auth_chain_index = await self.db_pool.simple_select_one_onecol(
+            table="rooms",
+            keyvalues={"room_id": room_id},
+            retcol="has_auth_chain_index",
+            desc="has_auth_chain_index",
+            allow_none=True,
+        )
+
+        if has_auth_chain_index:
+            return True
+
+        # It's possible that we already have events for the room in our DB
+        # without a corresponding room entry. If we do then we don't want to
+        # mark the room as having an auth chain cover index.
+        max_ordering = await self.db_pool.simple_select_one_onecol(
+            table="events",
+            keyvalues={"room_id": room_id},
+            retcol="MAX(stream_ordering)",
+            allow_none=True,
+            desc="upsert_room_on_join",
+        )
+
+        return max_ordering is None
+
 
 class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
     def __init__(self, database: DatabasePool, db_conn, hs):
@@ -1084,12 +1214,21 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
         Called when we join a room over federation, and overwrites any room version
         currently in the table.
         """
+        # It's possible that we already have events for the room in our DB
+        # without a corresponding room entry. If we do then we don't want to
+        # mark the room as having an auth chain cover index.
+        has_auth_chain_index = await self.has_auth_chain_index(room_id)
+
         await self.db_pool.simple_upsert(
             desc="upsert_room_on_join",
             table="rooms",
             keyvalues={"room_id": room_id},
             values={"room_version": room_version.identifier},
-            insertion_values={"is_public": False, "creator": ""},
+            insertion_values={
+                "is_public": False,
+                "creator": "",
+                "has_auth_chain_index": has_auth_chain_index,
+            },
             # rooms has a unique constraint on room_id, so no need to lock when doing an
             # emulated upsert.
             lock=False,
@@ -1124,6 +1263,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
                         "creator": room_creator_user_id,
                         "is_public": is_public,
                         "room_version": room_version.identifier,
+                        "has_auth_chain_index": True,
                     },
                 )
                 if is_public:
@@ -1145,13 +1285,20 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             logger.error("store_room with room_id=%s failed: %s", room_id, e)
             raise StoreError(500, "Problem creating room.")
 
-    async def maybe_store_room_on_invite(self, room_id: str, room_version: RoomVersion):
+    async def maybe_store_room_on_outlier_membership(
+        self, room_id: str, room_version: RoomVersion
+    ):
         """
-        When we receive an invite over federation, store the version of the room if we
-        don't already know the room version.
+        When we receive an invite or any other event over federation that may relate to a room
+        we are not in, store the version of the room if we don't already know the room version.
         """
+        # It's possible that we already have events for the room in our DB
+        # without a corresponding room entry. If we do then we don't want to
+        # mark the room as having an auth chain cover index.
+        has_auth_chain_index = await self.has_auth_chain_index(room_id)
+
         await self.db_pool.simple_upsert(
-            desc="maybe_store_room_on_invite",
+            desc="maybe_store_room_on_outlier_membership",
             table="rooms",
             keyvalues={"room_id": room_id},
             values={},
@@ -1159,6 +1306,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
                 "room_version": room_version.identifier,
                 "is_public": False,
                 "creator": "",
+                "has_auth_chain_index": has_auth_chain_index,
             },
             # rooms has a unique constraint on room_id, so no need to lock when doing an
             # emulated upsert.
@@ -1292,18 +1440,6 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             )
         self.hs.get_notifier().on_new_replication_data()
 
-    async def get_room_count(self) -> int:
-        """Retrieve the total number of rooms.
-        """
-
-        def f(txn):
-            sql = "SELECT count(*)  FROM rooms"
-            txn.execute(sql)
-            row = txn.fetchone()
-            return row[0] or 0
-
-        return await self.db_pool.runInteraction("get_rooms", f)
-
     async def add_event_report(
         self,
         room_id: str,
@@ -1326,6 +1462,65 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
                 "content": json_encoder.encode(content),
             },
             desc="add_event_report",
+        )
+
+    async def get_event_report(self, report_id: int) -> Optional[Dict[str, Any]]:
+        """Retrieve an event report
+
+        Args:
+            report_id: ID of reported event in database
+        Returns:
+            event_report: json list of information from event report
+        """
+
+        def _get_event_report_txn(txn, report_id):
+
+            sql = """
+                SELECT
+                    er.id,
+                    er.received_ts,
+                    er.room_id,
+                    er.event_id,
+                    er.user_id,
+                    er.content,
+                    events.sender,
+                    room_stats_state.canonical_alias,
+                    room_stats_state.name,
+                    event_json.json AS event_json
+                FROM event_reports AS er
+                LEFT JOIN events
+                    ON events.event_id = er.event_id
+                JOIN event_json
+                    ON event_json.event_id = er.event_id
+                JOIN room_stats_state
+                    ON room_stats_state.room_id = er.room_id
+                WHERE er.id = ?
+            """
+
+            txn.execute(sql, [report_id])
+            row = txn.fetchone()
+
+            if not row:
+                return None
+
+            event_report = {
+                "id": row[0],
+                "received_ts": row[1],
+                "room_id": row[2],
+                "event_id": row[3],
+                "user_id": row[4],
+                "score": db_to_json(row[5]).get("score"),
+                "reason": db_to_json(row[5]).get("reason"),
+                "sender": row[6],
+                "canonical_alias": row[7],
+                "name": row[8],
+                "event_json": db_to_json(row[9]),
+            }
+
+            return event_report
+
+        return await self.db_pool.runInteraction(
+            "get_event_report", _get_event_report_txn, report_id
         )
 
     async def get_event_reports_paginate(
@@ -1385,37 +1580,49 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
                     er.room_id,
                     er.event_id,
                     er.user_id,
-                    er.reason,
                     er.content,
                     events.sender,
-                    room_aliases.room_alias,
-                    event_json.json AS event_json
+                    room_stats_state.canonical_alias,
+                    room_stats_state.name
                 FROM event_reports AS er
-                LEFT JOIN room_aliases
-                    ON room_aliases.room_id = er.room_id
-                JOIN events
+                LEFT JOIN events
                     ON events.event_id = er.event_id
-                JOIN event_json
-                    ON event_json.event_id = er.event_id
+                JOIN room_stats_state
+                    ON room_stats_state.room_id = er.room_id
                 {where_clause}
                 ORDER BY er.received_ts {order}
                 LIMIT ?
                 OFFSET ?
             """.format(
-                where_clause=where_clause, order=order,
+                where_clause=where_clause,
+                order=order,
             )
 
             args += [limit, start]
             txn.execute(sql, args)
-            event_reports = self.db_pool.cursor_to_dict(txn)
 
-            if count > 0:
-                for row in event_reports:
-                    try:
-                        row["content"] = db_to_json(row["content"])
-                        row["event_json"] = db_to_json(row["event_json"])
-                    except Exception:
-                        continue
+            event_reports = []
+            for row in txn:
+                try:
+                    s = db_to_json(row[5]).get("score")
+                    r = db_to_json(row[5]).get("reason")
+                except Exception:
+                    logger.error("Unable to parse json from event_reports: %s", row[0])
+                    continue
+                event_reports.append(
+                    {
+                        "id": row[0],
+                        "received_ts": row[1],
+                        "room_id": row[2],
+                        "event_id": row[3],
+                        "user_id": row[4],
+                        "score": s,
+                        "reason": r,
+                        "sender": row[6],
+                        "canonical_alias": row[7],
+                        "name": row[8],
+                    }
+                )
 
             return event_reports, count
 
@@ -1446,88 +1653,3 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             self.is_room_blocked,
             (room_id,),
         )
-
-    async def get_rooms_for_retention_period_in_range(
-        self, min_ms: Optional[int], max_ms: Optional[int], include_null: bool = False
-    ) -> Dict[str, dict]:
-        """Retrieves all of the rooms within the given retention range.
-
-        Optionally includes the rooms which don't have a retention policy.
-
-        Args:
-            min_ms: Duration in milliseconds that define the lower limit of
-                the range to handle (exclusive). If None, doesn't set a lower limit.
-            max_ms: Duration in milliseconds that define the upper limit of
-                the range to handle (inclusive). If None, doesn't set an upper limit.
-            include_null: Whether to include rooms which retention policy is NULL
-                in the returned set.
-
-        Returns:
-            The rooms within this range, along with their retention
-            policy. The key is "room_id", and maps to a dict describing the retention
-            policy associated with this room ID. The keys for this nested dict are
-            "min_lifetime" (int|None), and "max_lifetime" (int|None).
-        """
-
-        def get_rooms_for_retention_period_in_range_txn(txn):
-            range_conditions = []
-            args = []
-
-            if min_ms is not None:
-                range_conditions.append("max_lifetime > ?")
-                args.append(min_ms)
-
-            if max_ms is not None:
-                range_conditions.append("max_lifetime <= ?")
-                args.append(max_ms)
-
-            # Do a first query which will retrieve the rooms that have a retention policy
-            # in their current state.
-            sql = """
-                SELECT room_id, min_lifetime, max_lifetime FROM room_retention
-                INNER JOIN current_state_events USING (event_id, room_id)
-                """
-
-            if len(range_conditions):
-                sql += " WHERE (" + " AND ".join(range_conditions) + ")"
-
-                if include_null:
-                    sql += " OR max_lifetime IS NULL"
-
-            txn.execute(sql, args)
-
-            rows = self.db_pool.cursor_to_dict(txn)
-            rooms_dict = {}
-
-            for row in rows:
-                rooms_dict[row["room_id"]] = {
-                    "min_lifetime": row["min_lifetime"],
-                    "max_lifetime": row["max_lifetime"],
-                }
-
-            if include_null:
-                # If required, do a second query that retrieves all of the rooms we know
-                # of so we can handle rooms with no retention policy.
-                sql = "SELECT DISTINCT room_id FROM current_state_events"
-
-                txn.execute(sql)
-
-                rows = self.db_pool.cursor_to_dict(txn)
-
-                # If a room isn't already in the dict (i.e. it doesn't have a retention
-                # policy in its state), add it with a null policy.
-                for row in rows:
-                    if row["room_id"] not in rooms_dict:
-                        rooms_dict[row["room_id"]] = {
-                            "min_lifetime": None,
-                            "max_lifetime": None,
-                        }
-
-            return rooms_dict
-
-        rooms = await self.db_pool.runInteraction(
-            "get_rooms_for_retention_period_in_range",
-            get_rooms_for_retention_period_in_range_txn,
-        )
-
-        return rooms
