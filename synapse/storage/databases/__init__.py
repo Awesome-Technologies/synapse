@@ -46,7 +46,7 @@ class Databases:
             db_name = database_config.name
             engine = create_engine(database_config.config)
 
-            with make_conn(database_config, engine) as db_conn:
+            with make_conn(database_config, engine, "startup") as db_conn:
                 logger.info("[database config %r]: Checking database server", db_name)
                 engine.check_database(db_conn)
 
@@ -56,7 +56,10 @@ class Databases:
                     database_config.databases,
                 )
                 prepare_database(
-                    db_conn, engine, hs.config, databases=database_config.databases,
+                    db_conn,
+                    engine,
+                    hs.config,
+                    databases=database_config.databases,
                 )
 
                 database = DatabasePool(hs, database_config, engine)
@@ -76,7 +79,7 @@ class Databases:
                     # If we're on a process that can persist events also
                     # instantiate a `PersistEventsStore`
                     if hs.get_instance_name() in hs.config.worker.writers.events:
-                        persist_events = PersistEventsStore(hs, database, main)
+                        persist_events = PersistEventsStore(hs, database, main, db_conn)
 
                 if "state" in database_config.databases:
                     logger.info(

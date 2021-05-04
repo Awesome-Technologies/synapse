@@ -11,7 +11,6 @@ The image also does *not* provide a TURN server.
 By default, the image expects a single volume, located at ``/data``, that will hold:
 
 * configuration files;
-* temporary files during uploads;
 * uploaded media and thumbnails;
 * the SQLite database if you do not configure postgres;
 * the appservices configuration.
@@ -83,7 +82,7 @@ docker logs synapse
 If all is well, you should now be able to connect to http://localhost:8008 and
 see a confirmation message.
 
-The following environment variables are supported in run mode:
+The following environment variables are supported in `run` mode:
 
 * `SYNAPSE_CONFIG_DIR`: where additional config files are stored. Defaults to
   `/data`.
@@ -93,6 +92,20 @@ The following environment variables are supported in run mode:
    Defaults to `synapse.app.homeserver`, which is suitable for non-worker mode.
 * `UID`, `GID`: the user and group id to run Synapse as. Defaults to `991`, `991`.
 * `TZ`: the [timezone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) the container will run with. Defaults to `UTC`.
+
+For more complex setups (e.g. for workers) you can also pass your args directly to synapse using `run` mode. For example like this:
+
+```
+docker run -d --name synapse \
+    --mount type=volume,src=synapse-data,dst=/data \
+    -p 8008:8008 \
+    matrixdotorg/synapse:latest run \
+    -m synapse.app.generic_worker \
+    --config-path=/data/homeserver.yaml \
+    --config-path=/data/generic_worker.yaml
+```
+
+If you do not provide `-m`, the value of the `SYNAPSE_WORKER` environment variable is used. If you do not provide at least one `--config-path` or `-c`, the value of the `SYNAPSE_CONFIG_PATH` environment variable is used instead.
 
 ## Generating an (admin) user
 

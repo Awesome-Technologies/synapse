@@ -42,7 +42,7 @@ def check(
     do_sig_check: bool = True,
     do_size_check: bool = True,
 ) -> None:
-    """ Checks if this event is correctly authed.
+    """Checks if this event is correctly authed.
 
     Args:
         room_version_obj: the version of the room
@@ -423,7 +423,9 @@ def _can_send_event(event: EventBase, auth_events: StateMap[EventBase]) -> bool:
 
 
 def check_redaction(
-    room_version_obj: RoomVersion, event: EventBase, auth_events: StateMap[EventBase],
+    room_version_obj: RoomVersion,
+    event: EventBase,
+    auth_events: StateMap[EventBase],
 ) -> bool:
     """Check whether the event sender is allowed to redact the target event.
 
@@ -446,6 +448,8 @@ def check_redaction(
 
     if room_version_obj.event_format == EventFormatVersions.V1:
         redacter_domain = get_domain_from_id(event.event_id)
+        if not isinstance(event.redacts, str):
+            return False
         redactee_domain = get_domain_from_id(event.redacts)
         if redacter_domain == redactee_domain:
             return True
@@ -457,7 +461,9 @@ def check_redaction(
 
 
 def _check_power_levels(
-    room_version_obj: RoomVersion, event: EventBase, auth_events: StateMap[EventBase],
+    room_version_obj: RoomVersion,
+    event: EventBase,
+    auth_events: StateMap[EventBase],
 ) -> None:
     user_list = event.content.get("users", {})
     # Validate users

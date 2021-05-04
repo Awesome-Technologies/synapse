@@ -51,10 +51,11 @@ import fcntl
 import logging
 import struct
 from inspect import isawaitable
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 from prometheus_client import Counter
 
+from twisted.internet import task
 from twisted.protocols.basic import LineOnlyReceiver
 from twisted.python.failure import Failure
 
@@ -152,9 +153,10 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
 
         self.last_received_command = self.clock.time_msec()
         self.last_sent_command = 0
-        self.time_we_closed = None  # When we requested the connection be closed
+        # When we requested the connection be closed
+        self.time_we_closed = None  # type: Optional[int]
 
-        self.received_ping = False  # Have we reecived a ping from the other side
+        self.received_ping = False  # Have we received a ping from the other side
 
         self.state = ConnectionStates.CONNECTING
 
@@ -165,13 +167,12 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
         self.pending_commands = []  # type: List[Command]
 
         # The LoopingCall for sending pings.
-        self._send_ping_loop = None
+        self._send_ping_loop = None  # type: Optional[task.LoopingCall]
 
         # a logcontext which we use for processing incoming commands. We declare it as a
         # background process so that the CPU stats get reported to prometheus.
         ctx_name = "replication-conn-%s" % self.conn_id
-        self._logging_context = BackgroundProcessLoggingContext(ctx_name)
-        self._logging_context.request = ctx_name
+        self._logging_context = BackgroundProcessLoggingContext(ctx_name, ctx_name)
 
     def connectionMade(self):
         logger.info("[%s] Connection established", self.id())
@@ -221,8 +222,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
                 self.send_error("ping timeout")
 
     def lineReceived(self, line: bytes):
-        """Called when we've received a line
-        """
+        """Called when we've received a line"""
         with PreserveLoggingContext(self._logging_context):
             self._parse_and_dispatch_line(line)
 
@@ -298,8 +298,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
         self.on_connection_closed()
 
     def send_error(self, error_string, *args):
-        """Send an error to remote and close the connection.
-        """
+        """Send an error to remote and close the connection."""
         self.send_command(ErrorCommand(error_string % args))
         self.close()
 
@@ -340,8 +339,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
         self.last_sent_command = self.clock.time_msec()
 
     def _queue_command(self, cmd):
-        """Queue the command until the connection is ready to write to again.
-        """
+        """Queue the command until the connection is ready to write to again."""
         logger.debug("[%s] Queueing as conn %r, cmd: %r", self.id(), self.state, cmd)
         self.pending_commands.append(cmd)
 
@@ -354,8 +352,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
             self.close()
 
     def _send_pending_commands(self):
-        """Send any queued commandes
-        """
+        """Send any queued commandes"""
         pending = self.pending_commands
         self.pending_commands = []
         for cmd in pending:
@@ -379,8 +376,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
         self.state = ConnectionStates.PAUSED
 
     def resumeProducing(self):
-        """The remote has caught up after we started buffering!
-        """
+        """The remote has caught up after we started buffering!"""
         logger.info("[%s] Resume producing", self.id())
         self.state = ConnectionStates.ESTABLISHED
         self._send_pending_commands()
@@ -439,8 +435,7 @@ class BaseReplicationStreamProtocol(LineOnlyReceiver):
         return "%s-%s" % (self.name, self.conn_id)
 
     def lineLengthExceeded(self, line):
-        """Called when we receive a line that is above the maximum line length
-        """
+        """Called when we receive a line that is above the maximum line length"""
         self.send_error("Line length exceeded")
 
 
@@ -494,21 +489,18 @@ class ClientReplicationStreamProtocol(BaseReplicationStreamProtocol):
             self.send_error("Wrong remote")
 
     def replicate(self):
-        """Send the subscription request to the server
-        """
+        """Send the subscription request to the server"""
         logger.info("[%s] Subscribing to replication streams", self.id())
 
         self.send_command(ReplicateCommand())
 
 
 class AbstractConnection(abc.ABC):
-    """An interface for replication connections.
-    """
+    """An interface for replication connections."""
 
     @abc.abstractmethod
     def send_command(self, cmd: Command):
-        """Send the command down the connection
-        """
+        """Send the command down the connection"""
         pass
 
 

@@ -15,6 +15,7 @@
 # limitations under the License.
 import logging
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Dict,
@@ -43,7 +44,6 @@ from synapse.replication.tcp.commands import (
     PositionCommand,
     RdataCommand,
     RemoteServerUpCommand,
-    RemovePusherCommand,
     ReplicateCommand,
     UserIpCommand,
     UserSyncCommand,
@@ -51,13 +51,20 @@ from synapse.replication.tcp.commands import (
 from synapse.replication.tcp.protocol import AbstractConnection
 from synapse.replication.tcp.streams import (
     STREAMS_MAP,
+    AccountDataStream,
     BackfillStream,
     CachesStream,
     EventsStream,
     FederationStream,
+    ReceiptsStream,
     Stream,
+    TagAccountDataStream,
+    ToDeviceStream,
     TypingStream,
 )
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +91,7 @@ class ReplicationCommandHandler:
     back out to connections.
     """
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         self._replication_data_handler = hs.get_replication_data_handler()
         self._presence_handler = hs.get_presence_handler()
         self._store = hs.get_datastore()
@@ -101,8 +108,9 @@ class ReplicationCommandHandler:
         self._streams_to_replicate = []  # type: List[Stream]
 
         for stream in self._streams.values():
-            if stream.NAME == CachesStream.NAME:
-                # All workers can write to the cache invalidation stream.
+            if hs.config.redis.redis_enabled and stream.NAME == CachesStream.NAME:
+                # All workers can write to the cache invalidation stream when
+                # using redis.
                 self._streams_to_replicate.append(stream)
                 continue
 
@@ -114,10 +122,34 @@ class ReplicationCommandHandler:
 
                 continue
 
+            if isinstance(stream, ToDeviceStream):
+                # Only add ToDeviceStream as a source on instances in charge of
+                # sending to device messages.
+                if hs.get_instance_name() in hs.config.worker.writers.to_device:
+                    self._streams_to_replicate.append(stream)
+
+                continue
+
             if isinstance(stream, TypingStream):
                 # Only add TypingStream as a source on the instance in charge of
                 # typing.
                 if hs.config.worker.writers.typing == hs.get_instance_name():
+                    self._streams_to_replicate.append(stream)
+
+                continue
+
+            if isinstance(stream, (AccountDataStream, TagAccountDataStream)):
+                # Only add AccountDataStream and TagAccountDataStream as a source on the
+                # instance in charge of account_data persistence.
+                if hs.get_instance_name() in hs.config.worker.writers.account_data:
+                    self._streams_to_replicate.append(stream)
+
+                continue
+
+            if isinstance(stream, ReceiptsStream):
+                # Only add ReceiptsStream as a source on the instance in charge of
+                # receipts.
+                if hs.get_instance_name() in hs.config.worker.writers.receipts:
                     self._streams_to_replicate.append(stream)
 
                 continue
@@ -251,16 +283,8 @@ class ReplicationCommandHandler:
         using TCP.
         """
         if hs.config.redis.redis_enabled:
-            import txredisapi
-
             from synapse.replication.tcp.redis import (
                 RedisDirectTcpReplicationClientFactory,
-            )
-
-            logger.info(
-                "Connecting to redis (host=%r port=%r)",
-                hs.config.redis_host,
-                hs.config.redis_port,
             )
 
             # First let's ensure that we have a ReplicationStreamer started.
@@ -271,19 +295,16 @@ class ReplicationCommandHandler:
             # connection after SUBSCRIBE is called).
 
             # First create the connection for sending commands.
-            outbound_redis_connection = txredisapi.lazyConnection(
-                host=hs.config.redis_host,
-                port=hs.config.redis_port,
-                password=hs.config.redis.redis_password,
-                reconnect=True,
-            )
+            outbound_redis_connection = hs.get_outbound_redis_connection()
 
             # Now create the factory/connection for the subscription stream.
             self._factory = RedisDirectTcpReplicationClientFactory(
                 hs, outbound_redis_connection
             )
             hs.get_reactor().connectTCP(
-                hs.config.redis.redis_host, hs.config.redis.redis_port, self._factory,
+                hs.config.redis.redis_host,
+                hs.config.redis.redis_port,
+                self._factory,
             )
         else:
             client_name = hs.get_instance_name()
@@ -293,13 +314,11 @@ class ReplicationCommandHandler:
             hs.get_reactor().connectTCP(host, port, self._factory)
 
     def get_streams(self) -> Dict[str, Stream]:
-        """Get a map from stream name to all streams.
-        """
+        """Get a map from stream name to all streams."""
         return self._streams
 
     def get_streams_to_replicate(self) -> List[Stream]:
-        """Get a list of streams that this instances replicates.
-        """
+        """Get a list of streams that this instances replicates."""
         return self._streams_to_replicate
 
     def on_REPLICATE(self, conn: AbstractConnection, cmd: ReplicateCommand):
@@ -313,11 +332,17 @@ class ReplicationCommandHandler:
         # We respond with current position of all streams this instance
         # replicates.
         for stream in self.get_streams_to_replicate():
+            # Note that we use the current token as the prev token here (rather
+            # than stream.last_token), as we can't be sure that there have been
+            # no rows written between last token and the current token (since we
+            # might be racing with the replication sending bg process).
+            current_token = stream.current_token(self._instance_name)
             self.send_command(
                 PositionCommand(
                     stream.NAME,
                     self._instance_name,
-                    stream.current_token(self._instance_name),
+                    current_token,
+                    current_token,
                 )
             )
 
@@ -346,23 +371,6 @@ class ReplicationCommandHandler:
 
         if self._federation_sender:
             self._federation_sender.federation_ack(cmd.instance_name, cmd.token)
-
-    def on_REMOVE_PUSHER(
-        self, conn: AbstractConnection, cmd: RemovePusherCommand
-    ) -> Optional[Awaitable[None]]:
-        remove_pusher_counter.inc()
-
-        if self._is_master:
-            return self._handle_remove_pusher(cmd)
-        else:
-            return None
-
-    async def _handle_remove_pusher(self, cmd: RemovePusherCommand):
-        await self._store.delete_pusher_by_app_id_pushkey_user_id(
-            app_id=cmd.app_id, pushkey=cmd.push_key, user_id=cmd.user_id
-        )
-
-        self._notifier.on_new_replication_data()
 
     def on_USER_IP(
         self, conn: AbstractConnection, cmd: UserIpCommand
@@ -511,16 +519,16 @@ class ReplicationCommandHandler:
         # If the position token matches our current token then we're up to
         # date and there's nothing to do. Otherwise, fetch all updates
         # between then and now.
-        missing_updates = cmd.token != current_token
+        missing_updates = cmd.prev_token != current_token
         while missing_updates:
             logger.info(
                 "Fetching replication rows for '%s' between %i and %i",
                 stream_name,
                 current_token,
-                cmd.token,
+                cmd.new_token,
             )
             (updates, current_token, missing_updates) = await stream.get_updates_since(
-                cmd.instance_name, current_token, cmd.token
+                cmd.instance_name, current_token, cmd.new_token
             )
 
             # TODO: add some tests for this
@@ -536,11 +544,11 @@ class ReplicationCommandHandler:
                     [stream.parse_row(row) for row in rows],
                 )
 
-        logger.info("Caught up with stream '%s' to %i", stream_name, cmd.token)
+        logger.info("Caught up with stream '%s' to %i", stream_name, cmd.new_token)
 
         # We've now caught up to position sent to us, notify handler.
         await self._replication_data_handler.on_position(
-            cmd.stream_name, cmd.instance_name, cmd.token
+            cmd.stream_name, cmd.instance_name, cmd.new_token
         )
 
         self._streams_by_connection.setdefault(conn, set()).add(stream_name)
@@ -569,8 +577,7 @@ class ReplicationCommandHandler:
         self.send_command(cmd, ignore_conn=conn)
 
     def new_connection(self, connection: AbstractConnection):
-        """Called when we have a new connection.
-        """
+        """Called when we have a new connection."""
         self._connections.append(connection)
 
         # If we are connected to replication as a client (rather than a server)
@@ -597,8 +604,7 @@ class ReplicationCommandHandler:
             )
 
     def lost_connection(self, connection: AbstractConnection):
-        """Called when a connection is closed/lost.
-        """
+        """Called when a connection is closed/lost."""
         # we no longer need _streams_by_connection for this connection.
         streams = self._streams_by_connection.pop(connection, None)
         if streams:
@@ -655,17 +661,10 @@ class ReplicationCommandHandler:
     def send_user_sync(
         self, instance_id: str, user_id: str, is_syncing: bool, last_sync_ms: int
     ):
-        """Poke the master that a user has started/stopped syncing.
-        """
+        """Poke the master that a user has started/stopped syncing."""
         self.send_command(
             UserSyncCommand(instance_id, user_id, is_syncing, last_sync_ms)
         )
-
-    def send_remove_pusher(self, app_id: str, push_key: str, user_id: str):
-        """Poke the master to remove a pusher for a user
-        """
-        cmd = RemovePusherCommand(app_id, push_key, user_id)
-        self.send_command(cmd)
 
     def send_user_ip(
         self,
@@ -676,8 +675,7 @@ class ReplicationCommandHandler:
         device_id: str,
         last_seen: int,
     ):
-        """Tell the master that the user made a request.
-        """
+        """Tell the master that the user made a request."""
         cmd = UserIpCommand(user_id, access_token, ip, user_agent, device_id, last_seen)
         self.send_command(cmd)
 
