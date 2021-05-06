@@ -10,7 +10,7 @@ The api is::
     GET /_synapse/admin/v2/users/<user_id>
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 It returns a JSON body like the following:
 
@@ -76,7 +76,7 @@ with a body of:
     }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 URL parameters:
 
@@ -118,7 +118,7 @@ The API is::
     GET /_synapse/admin/v2/users?from=0&limit=10&guests=false
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -233,7 +233,7 @@ See also: `Client Server API Whois
 <https://matrix.org/docs/spec/client_server/r0.6.1#get-matrix-client-r0-admin-whois-userid>`_
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 It returns a JSON body like the following:
 
@@ -289,7 +289,7 @@ with a body of:
     }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 The erase parameter is optional and defaults to ``false``.
 An empty body may be passed for backwards compatibility.
@@ -333,7 +333,7 @@ with a body of:
    }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 The parameter ``new_password`` is required.
 The parameter ``logout_devices`` is optional and defaults to ``true``.
@@ -347,7 +347,7 @@ The api is::
     GET /_synapse/admin/v1/users/<user_id>/admin
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -376,7 +376,7 @@ with a body of:
     }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 
 List room memberships of an user
@@ -388,7 +388,7 @@ The API is::
   GET /_synapse/admin/v1/users/<user_id>/joined_rooms
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -432,7 +432,7 @@ The API is::
   GET /_synapse/admin/v1/users/<user_id>/media
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -580,7 +580,7 @@ The API is::
   GET /_synapse/admin/v2/users/<user_id>/devices
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -647,7 +647,7 @@ The API is::
     }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 An empty JSON dict is returned.
 
@@ -670,7 +670,7 @@ The API is::
     GET /_synapse/admin/v2/users/<user_id>/devices/<device_id>
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -717,7 +717,7 @@ The API is::
     }
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 An empty JSON dict is returned.
 
@@ -745,7 +745,7 @@ The API is::
     {}
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 An empty JSON dict is returned.
 
@@ -765,7 +765,7 @@ The API is::
   GET /_synapse/admin/v1/users/<user_id>/pushers
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -854,7 +854,7 @@ The API is::
   POST /_synapse/admin/v1/users/<user_id>/shadow_ban
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 An empty JSON dict is returned.
 
@@ -879,7 +879,7 @@ The API is::
   GET /_synapse/admin/v1/users/<user_id>/override_ratelimit
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -920,7 +920,7 @@ The API is::
   POST /_synapse/admin/v1/users/<user_id>/override_ratelimit
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 A response body like the following is returned:
 
@@ -964,7 +964,7 @@ The API is::
   DELETE /_synapse/admin/v1/users/<user_id>/override_ratelimit
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see `README.rst <README.rst>`_.
+server admin: see `README.md <README.md>`_.
 
 An empty JSON dict is returned.
 

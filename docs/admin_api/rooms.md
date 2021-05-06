@@ -472,7 +472,7 @@ with a body of:
 ```
 
 To use it, you will need to authenticate by providing an ``access_token`` for a
-server admin: see [README.rst](README.rst).
+server admin: see [README.md](README.md).
 
 A response body like the following is returned:
 

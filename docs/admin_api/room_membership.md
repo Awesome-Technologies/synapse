@@ -24,7 +24,7 @@ POST /_synapse/admin/v1/join/<room_id_or_alias>
 ```
 
 To use it, you will need to authenticate by providing an `access_token` for a
-server admin: see [README.rst](README.rst).
+server admin: see [README.md](README.md).
 
 Response:
 
