@@ -72,6 +72,7 @@ from .transactions import TransactionStore
 from .ui_auth import UIAuthStore
 from .user_directory import UserDirectoryStore
 from .user_erasure_store import UserErasureStore
+from .amp_metrics import AmpMetricsStore
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ class DataStore(
     CacheInvalidationWorkerStore,
     ServerMetricsStore,
     EventForwardExtremitiesStore,
+    AmpMetricsStore,
 ):
     def __init__(self, database: DatabasePool, db_conn, hs):
         self.hs = hs

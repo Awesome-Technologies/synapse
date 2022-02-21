@@ -39,6 +39,7 @@ from synapse.util.async_helpers import Linearizer
 from synapse.util.daemonize import daemonize_process
 from synapse.util.rlimit import change_resource_limit
 from synapse.util.versionstring import get_version_string
+from synapse.app.amp_monitoring import monitor_amp_chat
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +333,9 @@ async def start(hs: "synapse.server.HomeServer", listeners: Iterable[ListenerCon
     # phone home stats.
     if hs.config.run_background_tasks:
         start_phone_stats_home(hs)
+
+    # Start monitoring for amp.chat
+    monitor_amp_chat(hs)
 
     # We now freeze all allocated objects in the hopes that (almost)
     # everything currently allocated are things that will be used for the
