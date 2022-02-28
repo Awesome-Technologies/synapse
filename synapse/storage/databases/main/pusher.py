@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -19,21 +18,25 @@ from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional,
 
 from synapse.push import PusherConfig, ThrottleParams
 from synapse.storage._base import SQLBaseStore, db_to_json
-from synapse.storage.database import DatabasePool
-from synapse.storage.types import Connection
+from synapse.storage.database import DatabasePool, LoggingDatabaseConnection
 from synapse.storage.util.id_generators import StreamIdGenerator
 from synapse.types import JsonDict
 from synapse.util import json_encoder
-from synapse.util.caches.descriptors import cached, cachedList
+from synapse.util.caches.descriptors import cached
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
 
 class PusherWorkerStore(SQLBaseStore):
-    def __init__(self, database: DatabasePool, db_conn: Connection, hs: "HomeServer"):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
         self._pushers_id_gen = StreamIdGenerator(
             db_conn, "pushers", "id", extra_tables=[("deleted_pushers", "stream_id")]
@@ -47,6 +50,11 @@ class PusherWorkerStore(SQLBaseStore):
         self.db_pool.updates.register_background_update_handler(
             "remove_stale_pushers",
             self._remove_stale_pushers,
+        )
+
+        self.db_pool.updates.register_background_update_handler(
+            "remove_deleted_email_pushers",
+            self._remove_deleted_email_pushers,
         )
 
     def _decode_pushers_rows(self, rows: Iterable[dict]) -> Iterator[PusherConfig]:
@@ -188,27 +196,6 @@ class PusherWorkerStore(SQLBaseStore):
         # This only exists for the cachedList decorator
         raise NotImplementedError()
 
-    @cachedList(
-        cached_method_name="get_if_user_has_pusher",
-        list_name="user_ids",
-        num_args=1,
-    )
-    async def get_if_users_have_pushers(
-        self, user_ids: Iterable[str]
-    ) -> Dict[str, bool]:
-        rows = await self.db_pool.simple_select_many_batch(
-            table="pushers",
-            column="user_name",
-            iterable=user_ids,
-            retcols=["user_name"],
-            desc="get_if_users_have_pushers",
-        )
-
-        result = {user_id: False for user_id in user_ids}
-        result.update({r["user_name"]: True for r in rows})
-
-        return result
-
     async def update_pusher_last_stream_ordering(
         self, app_id, pushkey, user_id, last_stream_ordering
     ) -> None:
@@ -320,7 +307,7 @@ class PusherWorkerStore(SQLBaseStore):
                 txn,
                 table="pushers",
                 column="user_name",
-                iterable=users,
+                values=users,
                 keyvalues={},
             )
 
@@ -369,7 +356,7 @@ class PusherWorkerStore(SQLBaseStore):
                 txn,
                 table="pushers",
                 column="id",
-                iterable=(pusher_id for pusher_id, token in pushers if token is None),
+                values=[pusher_id for pusher_id, token in pushers if token is None],
                 keyvalues={},
             )
 
@@ -386,6 +373,74 @@ class PusherWorkerStore(SQLBaseStore):
 
         if number_deleted < batch_size:
             await self.db_pool.updates._end_background_update("remove_stale_pushers")
+
+        return number_deleted
+
+    async def _remove_deleted_email_pushers(
+        self, progress: dict, batch_size: int
+    ) -> int:
+        """A background update that deletes all pushers for deleted email addresses.
+
+        In previous versions of synapse, when users deleted their email address, it didn't
+        also delete all the pushers for that email address. This background update removes
+        those to prevent unwanted emails. This should only need to be run once (when users
+        upgrade to v1.42.0
+
+        Args:
+            progress: dict used to store progress of this background update
+            batch_size: the maximum number of rows to retrieve in a single select query
+
+        Returns:
+            The number of deleted rows
+        """
+
+        last_pusher = progress.get("last_pusher", 0)
+
+        def _delete_pushers(txn) -> int:
+
+            sql = """
+                SELECT p.id, p.user_name, p.app_id, p.pushkey
+                FROM pushers AS p
+                    LEFT JOIN user_threepids AS t
+                        ON t.user_id = p.user_name
+                        AND t.medium = 'email'
+                        AND t.address = p.pushkey
+                WHERE t.user_id is NULL
+                    AND p.app_id = 'm.email'
+                    AND p.id > ?
+                ORDER BY p.id ASC
+                LIMIT ?
+            """
+
+            txn.execute(sql, (last_pusher, batch_size))
+            rows = txn.fetchall()
+
+            last = None
+            num_deleted = 0
+            for row in rows:
+                last = row[0]
+                num_deleted += 1
+                self.db_pool.simple_delete_txn(
+                    txn,
+                    "pushers",
+                    {"user_name": row[1], "app_id": row[2], "pushkey": row[3]},
+                )
+
+            if last is not None:
+                self.db_pool.updates._background_update_progress_txn(
+                    txn, "remove_deleted_email_pushers", {"last_pusher": last}
+                )
+
+            return num_deleted
+
+        number_deleted = await self.db_pool.runInteraction(
+            "_remove_deleted_email_pushers", _delete_pushers
+        )
+
+        if number_deleted < batch_size:
+            await self.db_pool.updates._end_background_update(
+                "remove_deleted_email_pushers"
+            )
 
         return number_deleted
 
@@ -439,7 +494,7 @@ class PusherStore(PusherWorkerStore):
                 # invalidate, since we the user might not have had a pusher before
                 await self.db_pool.runInteraction(
                     "add_pusher",
-                    self._invalidate_cache_and_stream,  # type: ignore
+                    self._invalidate_cache_and_stream,  # type: ignore[attr-defined]
                     self.get_if_user_has_pusher,
                     (user_id,),
                 )
@@ -448,7 +503,7 @@ class PusherStore(PusherWorkerStore):
         self, app_id: str, pushkey: str, user_id: str
     ) -> None:
         def delete_pusher_txn(txn, stream_id):
-            self._invalidate_cache_and_stream(  # type: ignore
+            self._invalidate_cache_and_stream(  # type: ignore[attr-defined]
                 txn, self.get_if_user_has_pusher, (user_id,)
             )
 
@@ -493,7 +548,7 @@ class PusherStore(PusherWorkerStore):
         pushers = list(await self.get_pushers_by_user_id(user_id))
 
         def delete_pushers_txn(txn, stream_ids):
-            self._invalidate_cache_and_stream(  # type: ignore
+            self._invalidate_cache_and_stream(  # type: ignore[attr-defined]
                 txn, self.get_if_user_has_pusher, (user_id,)
             )
 

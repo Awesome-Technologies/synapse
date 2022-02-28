@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,35 +14,57 @@
 
 import logging
 import re
-from collections import namedtuple
-from typing import List, Optional, Set
+from typing import TYPE_CHECKING, Collection, Iterable, List, Optional, Set
+
+import attr
 
 from synapse.api.errors import SynapseError
 from synapse.events import EventBase
 from synapse.storage._base import SQLBaseStore, db_to_json, make_in_list_sql_clause
-from synapse.storage.database import DatabasePool
+from synapse.storage.database import (
+    DatabasePool,
+    LoggingDatabaseConnection,
+    LoggingTransaction,
+)
 from synapse.storage.databases.main.events_worker import EventRedactBehaviour
 from synapse.storage.engines import PostgresEngine, Sqlite3Engine
-from synapse.types import Collection
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
-SearchEntry = namedtuple(
-    "SearchEntry",
-    ["key", "value", "event_id", "room_id", "stream_ordering", "origin_server_ts"],
-)
+
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class SearchEntry:
+    key: str
+    value: str
+    event_id: str
+    room_id: str
+    stream_ordering: Optional[int]
+    origin_server_ts: int
+
+
+def _clean_value_for_search(value: str) -> str:
+    """
+    Replaces any null code points in the string with spaces as
+    Postgres and SQLite do not like the insertion of strings with
+    null code points into the full-text search tables.
+    """
+    return value.replace("\u0000", " ")
 
 
 class SearchWorkerStore(SQLBaseStore):
-    def store_search_entries_txn(self, txn, entries):
+    def store_search_entries_txn(
+        self, txn: LoggingTransaction, entries: Iterable[SearchEntry]
+    ) -> None:
         """Add entries to the search table
 
         Args:
-            txn (cursor):
-            entries (iterable[SearchEntry]):
-                entries to be added to the table
+            txn:
+            entries: entries to be added to the table
         """
-        if not self.hs.config.enable_search:
+        if not self.hs.config.server.enable_search:
             return
         if isinstance(self.database_engine, PostgresEngine):
             sql = (
@@ -57,7 +78,7 @@ class SearchWorkerStore(SQLBaseStore):
                     entry.event_id,
                     entry.room_id,
                     entry.key,
-                    entry.value,
+                    _clean_value_for_search(entry.value),
                     entry.stream_ordering,
                     entry.origin_server_ts,
                 )
@@ -72,11 +93,16 @@ class SearchWorkerStore(SQLBaseStore):
                 " VALUES (?,?,?,?)"
             )
             args = (
-                (entry.event_id, entry.room_id, entry.key, entry.value)
+                (
+                    entry.event_id,
+                    entry.room_id,
+                    entry.key,
+                    _clean_value_for_search(entry.value),
+                )
                 for entry in entries
             )
-
             txn.execute_batch(sql, args)
+
         else:
             # This should be unreachable.
             raise Exception("Unrecognized database engine")
@@ -89,10 +115,15 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
     EVENT_SEARCH_USE_GIST_POSTGRES_NAME = "event_search_postgres_gist"
     EVENT_SEARCH_USE_GIN_POSTGRES_NAME = "event_search_postgres_gin"
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
 
-        if not hs.config.enable_search:
+        if not hs.config.server.enable_search:
             return
 
         self.db_pool.updates.register_background_update_handler(
@@ -342,7 +373,12 @@ class SearchBackgroundUpdateStore(SearchWorkerStore):
 
 
 class SearchStore(SearchBackgroundUpdateStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
 
     async def search_msgs(self, room_ids, search_term, keys):
@@ -648,6 +684,7 @@ class SearchStore(SearchBackgroundUpdateStore):
                 for key in ("body", "name", "topic"):
                     v = event.content.get(key, None)
                     if v:
+                        v = _clean_value_for_search(v)
                         values.append(v)
 
                 if not values:

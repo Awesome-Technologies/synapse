@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Set
+from typing import Iterable, Optional, Set
 
 from synapse.api.constants import AccountDataTypes
 
@@ -26,7 +25,7 @@ class IgnoredUsersTestCase(unittest.HomeserverTestCase):
         self.user = "@user:test"
 
     def _update_ignore_list(
-        self, *ignored_user_ids: Iterable[str], ignorer_user_id: str = None
+        self, *ignored_user_ids: Iterable[str], ignorer_user_id: Optional[str] = None
     ) -> None:
         """Update the account data to block the given users."""
         if ignorer_user_id is None:

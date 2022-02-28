@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014, 2015 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,15 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
-from collections import namedtuple
-from typing import Dict, List
+from typing import Dict, List, Tuple
+from urllib.request import getproxies_environment  # type: ignore
+
+import attr
 
 from synapse.config.server import DEFAULT_IP_RANGE_BLACKLIST, generate_ip_set
 from synapse.python_dependencies import DependencyException, check_requirements
+from synapse.types import JsonDict
 from synapse.util.module_loader import load_module
 
 from ._base import Config, ConfigError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_THUMBNAIL_SIZES = [
     {"width": 32, "height": 32, "method": "crop"},
@@ -37,33 +42,39 @@ THUMBNAIL_SIZE_YAML = """\
         #    method: %(method)s
 """
 
-ThumbnailRequirement = namedtuple(
-    "ThumbnailRequirement", ["width", "height", "method", "media_type"]
-)
-
-MediaStorageProviderConfig = namedtuple(
-    "MediaStorageProviderConfig",
-    (
-        "store_local",  # Whether to store newly uploaded local files
-        "store_remote",  # Whether to store newly downloaded remote files
-        "store_synchronous",  # Whether to wait for successful storage for local uploads
-    ),
-)
+HTTP_PROXY_SET_WARNING = """\
+The Synapse config url_preview_ip_range_blacklist will be ignored as an HTTP(s) proxy is configured."""
 
 
-def parse_thumbnail_requirements(thumbnail_sizes):
+@attr.s(frozen=True, slots=True, auto_attribs=True)
+class ThumbnailRequirement:
+    width: int
+    height: int
+    method: str
+    media_type: str
+
+
+@attr.s(frozen=True, slots=True, auto_attribs=True)
+class MediaStorageProviderConfig:
+    store_local: bool  # Whether to store newly uploaded local files
+    store_remote: bool  # Whether to store newly downloaded remote files
+    store_synchronous: bool  # Whether to wait for successful storage for local uploads
+
+
+def parse_thumbnail_requirements(
+    thumbnail_sizes: List[JsonDict],
+) -> Dict[str, Tuple[ThumbnailRequirement, ...]]:
     """Takes a list of dictionaries with "width", "height", and "method" keys
     and creates a map from image media types to the thumbnail size, thumbnailing
     method, and thumbnail media type to precalculate
 
     Args:
-        thumbnail_sizes(list): List of dicts with "width", "height", and
-            "method" keys
+        thumbnail_sizes: List of dicts with "width", "height", and "method" keys
+
     Returns:
-        Dictionary mapping from media type string to list of
-        ThumbnailRequirement tuples.
+        Dictionary mapping from media type string to list of ThumbnailRequirement.
     """
-    requirements = {}  # type: Dict[str, List]
+    requirements: Dict[str, List[ThumbnailRequirement]] = {}
     for size in thumbnail_sizes:
         width = size["width"]
         height = size["height"]
@@ -71,6 +82,7 @@ def parse_thumbnail_requirements(thumbnail_sizes):
         jpeg_thumbnail = ThumbnailRequirement(width, height, method, "image/jpeg")
         png_thumbnail = ThumbnailRequirement(width, height, method, "image/png")
         requirements.setdefault("image/jpeg", []).append(jpeg_thumbnail)
+        requirements.setdefault("image/jpg", []).append(jpeg_thumbnail)
         requirements.setdefault("image/webp", []).append(jpeg_thumbnail)
         requirements.setdefault("image/gif", []).append(png_thumbnail)
         requirements.setdefault("image/png", []).append(png_thumbnail)
@@ -87,7 +99,7 @@ class ContentRepositoryConfig(Config):
         # Only enable the media repo if either the media repo is enabled or the
         # current worker app is the media repo.
         if (
-            self.enable_media_repo is False
+            self.root.server.enable_media_repo is False
             and config.get("worker_app") != "synapse.app.media_repository"
         ):
             self.can_load_media_repo = False
@@ -141,7 +153,7 @@ class ContentRepositoryConfig(Config):
         #
         # We don't create the storage providers here as not all workers need
         # them to be started.
-        self.media_storage_providers = []  # type: List[tuple]
+        self.media_storage_providers: List[tuple] = []
 
         for i, provider_config in enumerate(storage_providers):
             # We special case the module "file_system" so as not to need to
@@ -176,14 +188,21 @@ class ContentRepositoryConfig(Config):
                 check_requirements("url_preview")
 
             except DependencyException as e:
-                raise ConfigError(e.message)
-
-            if "url_preview_ip_range_blacklist" not in config:
                 raise ConfigError(
-                    "For security, you must specify an explicit target IP address "
-                    "blacklist in url_preview_ip_range_blacklist for url previewing "
-                    "to work"
+                    e.message  # noqa: B306, DependencyException.message is a property
                 )
+
+            proxy_env = getproxies_environment()
+            if "url_preview_ip_range_blacklist" not in config:
+                if "http" not in proxy_env or "https" not in proxy_env:
+                    raise ConfigError(
+                        "For security, you must specify an explicit target IP address "
+                        "blacklist in url_preview_ip_range_blacklist for url previewing "
+                        "to work"
+                    )
+            else:
+                if "http" in proxy_env or "https" in proxy_env:
+                    logger.warning("".join(HTTP_PROXY_SET_WARNING))
 
             # we always blacklist '0.0.0.0' and '::', which are supposed to be
             # unroutable addresses.
@@ -246,6 +265,10 @@ class ContentRepositoryConfig(Config):
 
         # The largest allowed upload size in bytes
         #
+        # If you are using a reverse proxy you may also need to set this value in
+        # your reverse proxy's config. Notably Nginx has a small max body size by default.
+        # See https://matrix-org.github.io/synapse/latest/reverse_proxy.html.
+        #
         #max_upload_size: 50M
 
         # Maximum number of pixels that will be thumbnailed
@@ -285,6 +308,8 @@ class ContentRepositoryConfig(Config):
         #
         # This must be specified if url_preview_enabled is set. It is recommended that
         # you uncomment the following list as a starting point.
+        #
+        # Note: The value is ignored when an HTTP proxy is in use
         #
         #url_preview_ip_range_blacklist:
 %(ip_range_blacklist)s

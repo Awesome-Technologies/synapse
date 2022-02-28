@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -68,5 +67,5 @@ class ReplicationRemovePusherRestServlet(ReplicationEndpoint):
         return 200, {}
 
 
-def register_servlets(hs, http_server):
+def register_servlets(hs: "HomeServer", http_server):
     ReplicationRemovePusherRestServlet(hs).register(http_server)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,10 +16,13 @@
 """
 from typing import Any, List, Optional, Type, Union
 
-class RedisProtocol:
+from twisted.internet import protocol
+from twisted.internet.defer import Deferred
+
+class RedisProtocol(protocol.Protocol):
     def publish(self, channel: str, message: bytes): ...
-    async def ping(self) -> None: ...
-    async def set(
+    def ping(self) -> "Deferred[None]": ...
+    def set(
         self,
         key: str,
         value: Any,
@@ -28,8 +30,8 @@ class RedisProtocol:
         pexpire: Optional[int] = None,
         only_if_not_exists: bool = False,
         only_if_exists: bool = False,
-    ) -> None: ...
-    async def get(self, key: str) -> Any: ...
+    ) -> "Deferred[None]": ...
+    def get(self, key: str) -> "Deferred[Any]": ...
 
 class SubscriberProtocol(RedisProtocol):
     def __init__(self, *args, **kwargs): ...
@@ -52,7 +54,7 @@ def lazyConnection(
 
 class ConnectionHandler: ...
 
-class RedisFactory:
+class RedisFactory(protocol.ReconnectingClientFactory):
     continueTrying: bool
     handler: RedisProtocol
     pool: List[RedisProtocol]
@@ -72,4 +74,4 @@ class RedisFactory:
     def buildProtocol(self, addr) -> RedisProtocol: ...
 
 class SubscriberFactory(RedisFactory):
-    def __init__(self): ...
+    def __init__(self) -> None: ...

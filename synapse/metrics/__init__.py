@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +20,25 @@ import os
 import platform
 import threading
 import time
-from typing import Callable, Dict, Iterable, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    Iterable,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import attr
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, Metric
 from prometheus_client.core import (
     REGISTRY,
     CounterMetricFamily,
@@ -33,6 +47,8 @@ from prometheus_client.core import (
 )
 
 from twisted.internet import reactor
+from twisted.internet.base import ReactorBase
+from twisted.python.threadpool import ThreadPool
 
 import synapse
 from synapse.metrics._exposition import (
@@ -47,14 +63,14 @@ logger = logging.getLogger(__name__)
 METRICS_PREFIX = "/_synapse/metrics"
 
 running_on_pypy = platform.python_implementation() == "PyPy"
-all_gauges = {}  # type: Dict[str, Union[LaterGauge, InFlightGauge]]
+all_gauges: "Dict[str, Union[LaterGauge, InFlightGauge]]" = {}
 
 HAVE_PROC_SELF_STAT = os.path.exists("/proc/self/stat")
 
 
 class RegistryProxy:
     @staticmethod
-    def collect():
+    def collect() -> Iterable[Metric]:
         for metric in REGISTRY.collect():
             if not metric.name.startswith("__"):
                 yield metric
@@ -68,9 +84,13 @@ class LaterGauge:
     labels = attr.ib(hash=False, type=Optional[Iterable[str]])
     # callback: should either return a value (if there are no labels for this metric),
     # or dict mapping from a label tuple to a value
-    caller = attr.ib(type=Callable[[], Union[Dict[Tuple[str, ...], float], float]])
+    caller = attr.ib(
+        type=Callable[
+            [], Union[Mapping[Tuple[str, ...], Union[int, float]], Union[int, float]]
+        ]
+    )
 
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
 
         g = GaugeMetricFamily(self.name, self.desc, labels=self.labels)
 
@@ -81,18 +101,18 @@ class LaterGauge:
             yield g
             return
 
-        if isinstance(calls, dict):
+        if isinstance(calls, (int, float)):
+            g.add_metric([], calls)
+        else:
             for k, v in calls.items():
                 g.add_metric(k, v)
-        else:
-            g.add_metric([], calls)
 
         yield g
 
-    def __attrs_post_init__(self):
+    def __attrs_post_init__(self) -> None:
         self._register()
 
-    def _register(self):
+    def _register(self) -> None:
         if self.name in all_gauges.keys():
             logger.warning("%s already registered, reregistering" % (self.name,))
             REGISTRY.unregister(all_gauges.pop(self.name))
@@ -101,7 +121,12 @@ class LaterGauge:
         all_gauges[self.name] = self
 
 
-class InFlightGauge:
+# `MetricsEntry` only makes sense when it is a `Protocol`,
+# but `Protocol` can't be used as a `TypeVar` bound.
+MetricsEntry = TypeVar("MetricsEntry")
+
+
+class InFlightGauge(Generic[MetricsEntry]):
     """Tracks number of things (e.g. requests, Measure blocks, etc) in flight
     at any given time.
 
@@ -111,14 +136,19 @@ class InFlightGauge:
     callbacks.
 
     Args:
-        name (str)
-        desc (str)
-        labels (list[str])
-        sub_metrics (list[str]): A list of sub metrics that the callbacks
-            will update.
+        name
+        desc
+        labels
+        sub_metrics: A list of sub metrics that the callbacks will update.
     """
 
-    def __init__(self, name, desc, labels, sub_metrics):
+    def __init__(
+        self,
+        name: str,
+        desc: str,
+        labels: Sequence[str],
+        sub_metrics: Sequence[str],
+    ):
         self.name = name
         self.desc = desc
         self.labels = labels
@@ -126,19 +156,25 @@ class InFlightGauge:
 
         # Create a class which have the sub_metrics values as attributes, which
         # default to 0 on initialization. Used to pass to registered callbacks.
-        self._metrics_class = attr.make_class(
+        self._metrics_class: Type[MetricsEntry] = attr.make_class(
             "_MetricsEntry", attrs={x: attr.ib(0) for x in sub_metrics}, slots=True
         )
 
         # Counts number of in flight blocks for a given set of label values
-        self._registrations = {}  # type: Dict
+        self._registrations: Dict[
+            Tuple[str, ...], Set[Callable[[MetricsEntry], None]]
+        ] = {}
 
         # Protects access to _registrations
         self._lock = threading.Lock()
 
         self._register_with_collector()
 
-    def register(self, key, callback):
+    def register(
+        self,
+        key: Tuple[str, ...],
+        callback: Callable[[MetricsEntry], None],
+    ) -> None:
         """Registers that we've entered a new block with labels `key`.
 
         `callback` gets called each time the metrics are collected. The same
@@ -154,13 +190,17 @@ class InFlightGauge:
         with self._lock:
             self._registrations.setdefault(key, set()).add(callback)
 
-    def unregister(self, key, callback):
+    def unregister(
+        self,
+        key: Tuple[str, ...],
+        callback: Callable[[MetricsEntry], None],
+    ) -> None:
         """Registers that we've exited a block with labels `key`."""
 
         with self._lock:
             self._registrations.setdefault(key, set()).discard(callback)
 
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
         """Called by prometheus client when it reads metrics.
 
         Note: may be called by a separate thread.
@@ -196,7 +236,7 @@ class InFlightGauge:
                 gauge.add_metric(key, getattr(metrics, name))
             yield gauge
 
-    def _register_with_collector(self):
+    def _register_with_collector(self) -> None:
         if self.name in all_gauges.keys():
             logger.warning("%s already registered, reregistering" % (self.name,))
             REGISTRY.unregister(all_gauges.pop(self.name))
@@ -214,14 +254,19 @@ class GaugeBucketCollector:
     Prometheus, and optimise for that case.
     """
 
-    __slots__ = ("_name", "_documentation", "_bucket_bounds", "_metric")
+    __slots__ = (
+        "_name",
+        "_documentation",
+        "_bucket_bounds",
+        "_metric",
+    )
 
     def __init__(
         self,
         name: str,
         documentation: str,
         buckets: Iterable[float],
-        registry=REGISTRY,
+        registry: CollectorRegistry = REGISTRY,
     ):
         """
         Args:
@@ -242,13 +287,18 @@ class GaugeBucketCollector:
         if self._bucket_bounds[-1] != float("inf"):
             self._bucket_bounds.append(float("inf"))
 
-        self._metric = self._values_to_metric([])
+        # We initially set this to None. We won't report metrics until
+        # this has been initialised after a successful data update
+        self._metric: Optional[GaugeHistogramMetricFamily] = None
+
         registry.register(self)
 
-    def collect(self):
-        yield self._metric
+    def collect(self) -> Iterable[Metric]:
+        # Don't report metrics unless we've already collected some data
+        if self._metric is not None:
+            yield self._metric
 
-    def update_data(self, values: Iterable[float]):
+    def update_data(self, values: Iterable[float]) -> None:
         """Update the data to be reported by the metric
 
         The existing data is cleared, and each measurement in the input is assigned
@@ -290,7 +340,7 @@ class GaugeBucketCollector:
 
 
 class CPUMetrics:
-    def __init__(self):
+    def __init__(self) -> None:
         ticks_per_sec = 100
         try:
             # Try and get the system config
@@ -300,7 +350,7 @@ class CPUMetrics:
 
         self.ticks_per_sec = ticks_per_sec
 
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
         if not HAVE_PROC_SELF_STAT:
             return
 
@@ -350,7 +400,7 @@ gc_time = Histogram(
 
 
 class GCCounts:
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
         cm = GaugeMetricFamily("python_gc_counts", "GC object counts", labels=["gen"])
         for n, m in enumerate(gc.get_count()):
             cm.add_metric([str(n)], m)
@@ -368,7 +418,7 @@ if not running_on_pypy:
 
 
 class PyPyGCStats:
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
 
         # @stats is a pretty-printer object with __str__() returning a nice table,
         # plus some fields that contain data from that table.
@@ -513,9 +563,45 @@ threepid_send_requests = Histogram(
     labelnames=("type", "reason"),
 )
 
+threadpool_total_threads = Gauge(
+    "synapse_threadpool_total_threads",
+    "Total number of threads currently in the threadpool",
+    ["name"],
+)
+
+threadpool_total_working_threads = Gauge(
+    "synapse_threadpool_working_threads",
+    "Number of threads currently working in the threadpool",
+    ["name"],
+)
+
+threadpool_total_min_threads = Gauge(
+    "synapse_threadpool_min_threads",
+    "Minimum number of threads configured in the threadpool",
+    ["name"],
+)
+
+threadpool_total_max_threads = Gauge(
+    "synapse_threadpool_max_threads",
+    "Maximum number of threads configured in the threadpool",
+    ["name"],
+)
+
+
+def register_threadpool(name: str, threadpool: ThreadPool) -> None:
+    """Add metrics for the threadpool."""
+
+    threadpool_total_min_threads.labels(name).set(threadpool.min)
+    threadpool_total_max_threads.labels(name).set(threadpool.max)
+
+    threadpool_total_threads.labels(name).set_function(lambda: len(threadpool.threads))
+    threadpool_total_working_threads.labels(name).set_function(
+        lambda: len(threadpool.working)
+    )
+
 
 class ReactorLastSeenMetric:
-    def collect(self):
+    def collect(self) -> Iterable[Metric]:
         cm = GaugeMetricFamily(
             "python_twisted_reactor_last_seen",
             "Seconds since the Twisted reactor was last seen",
@@ -526,10 +612,20 @@ class ReactorLastSeenMetric:
 
 REGISTRY.register(ReactorLastSeenMetric())
 
+# The minimum time in seconds between GCs for each generation, regardless of the current GC
+# thresholds and counts.
+MIN_TIME_BETWEEN_GCS = (1.0, 10.0, 30.0)
 
-def runUntilCurrentTimer(reactor, func):
+# The time (in seconds since the epoch) of the last time we did a GC for each generation.
+_last_gc = [0.0, 0.0, 0.0]
+
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def runUntilCurrentTimer(reactor: ReactorBase, func: F) -> F:
     @functools.wraps(func)
-    def f(*args, **kwargs):
+    def f(*args: Any, **kwargs: Any) -> Any:
         now = reactor.seconds()
         num_pending = 0
 
@@ -566,11 +662,16 @@ def runUntilCurrentTimer(reactor, func):
             return ret
 
         # Check if we need to do a manual GC (since its been disabled), and do
-        # one if necessary.
+        # one if necessary. Note we go in reverse order as e.g. a gen 1 GC may
+        # promote an object into gen 2, and we don't want to handle the same
+        # object multiple times.
         threshold = gc.get_threshold()
         counts = gc.get_count()
         for i in (2, 1, 0):
-            if threshold[i] < counts[i]:
+            # We check if we need to do one based on a straightforward
+            # comparison between the threshold and count. We also do an extra
+            # check to make sure that we don't a GC too often.
+            if threshold[i] < counts[i] and MIN_TIME_BETWEEN_GCS[i] < end - _last_gc[i]:
                 if i == 0:
                     logger.debug("Collecting gc %d", i)
                 else:
@@ -580,12 +681,14 @@ def runUntilCurrentTimer(reactor, func):
                 unreachable = gc.collect(i)
                 end = time.time()
 
+                _last_gc[i] = end
+
                 gc_time.labels(i).observe(end - start)
                 gc_unreachable.labels(i).set(unreachable)
 
         return ret
 
-    return f
+    return cast(F, f)
 
 
 try:
@@ -606,11 +709,12 @@ try:
 except AttributeError:
     pass
 
+
 __all__ = [
     "MetricsResource",
     "generate_latest",
     "start_http_server",
     "LaterGauge",
     "InFlightGauge",
-    "BucketCollector",
+    "GaugeBucketCollector",
 ]

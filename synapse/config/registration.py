@@ -1,5 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
+# Copyright 2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,73 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-import os
-
-import pkg_resources
+import argparse
+from typing import Optional
 
 from synapse.api.constants import RoomCreationPreset
 from synapse.config._base import Config, ConfigError
 from synapse.types import RoomAlias, UserID
 from synapse.util.stringutils import random_string_with_symbols, strtobool
-
-
-class AccountValidityConfig(Config):
-    section = "accountvalidity"
-
-    def __init__(self, config, synapse_config):
-        if config is None:
-            return
-        super().__init__()
-        self.enabled = config.get("enabled", False)
-        self.renew_by_email_enabled = "renew_at" in config
-
-        if self.enabled:
-            if "period" in config:
-                self.period = self.parse_duration(config["period"])
-            else:
-                raise ConfigError("'period' is required when using account validity")
-
-            if "renew_at" in config:
-                self.renew_at = self.parse_duration(config["renew_at"])
-
-            if "renew_email_subject" in config:
-                self.renew_email_subject = config["renew_email_subject"]
-            else:
-                self.renew_email_subject = "Renew your %(app)s account"
-
-            self.startup_job_max_delta = self.period * 10.0 / 100.0
-
-        if self.renew_by_email_enabled:
-            if "public_baseurl" not in synapse_config:
-                raise ConfigError("Can't send renewal emails without 'public_baseurl'")
-
-        template_dir = config.get("template_dir")
-
-        if not template_dir:
-            template_dir = pkg_resources.resource_filename("synapse", "res/templates")
-
-        if "account_renewed_html_path" in config:
-            file_path = os.path.join(template_dir, config["account_renewed_html_path"])
-
-            self.account_renewed_html_content = self.read_file(
-                file_path, "account_validity.account_renewed_html_path"
-            )
-        else:
-            self.account_renewed_html_content = (
-                "<html><body>Your account has been successfully renewed.</body><html>"
-            )
-
-        if "invalid_token_html_path" in config:
-            file_path = os.path.join(template_dir, config["invalid_token_html_path"])
-
-            self.invalid_token_html_content = self.read_file(
-                file_path, "account_validity.invalid_token_html_path"
-            )
-        else:
-            self.invalid_token_html_content = (
-                "<html><body>Invalid renewal token.</body><html>"
-            )
 
 
 class RegistrationConfig(Config):
@@ -93,30 +33,19 @@ class RegistrationConfig(Config):
                 str(config["disable_registration"])
             )
 
-        self.account_validity = AccountValidityConfig(
-            config.get("account_validity") or {}, config
-        )
-
         self.registrations_require_3pid = config.get("registrations_require_3pid", [])
         self.allowed_local_3pids = config.get("allowed_local_3pids", [])
         self.enable_3pid_lookup = config.get("enable_3pid_lookup", True)
+        self.registration_requires_token = config.get(
+            "registration_requires_token", False
+        )
         self.registration_shared_secret = config.get("registration_shared_secret")
 
         self.bcrypt_rounds = config.get("bcrypt_rounds", 12)
-        self.trusted_third_party_id_servers = config.get(
-            "trusted_third_party_id_servers", ["matrix.org", "vector.im"]
-        )
+
         account_threepid_delegates = config.get("account_threepid_delegates") or {}
         self.account_threepid_delegate_email = account_threepid_delegates.get("email")
         self.account_threepid_delegate_msisdn = account_threepid_delegates.get("msisdn")
-        if self.account_threepid_delegate_msisdn and not self.public_baseurl:
-            raise ConfigError(
-                "The configuration option `public_baseurl` is required if "
-                "`account_threepid_delegate.msisdn` is set, such that "
-                "clients know where to submit validation tokens to. Please "
-                "configure `public_baseurl`."
-            )
-
         self.default_identity_server = config.get("default_identity_server")
         self.allow_guest_access = config.get("allow_guest_access", False)
 
@@ -149,7 +78,7 @@ class RegistrationConfig(Config):
         if mxid_localpart:
             # Convert the localpart to a full mxid.
             self.auto_join_user_id = UserID(
-                mxid_localpart, self.server_name
+                mxid_localpart, self.root.server.server_name
             ).to_string()
 
         if self.autocreate_auto_join_rooms:
@@ -186,6 +115,78 @@ class RegistrationConfig(Config):
             session_lifetime = self.parse_duration(session_lifetime)
         self.session_lifetime = session_lifetime
 
+        # The `refreshable_access_token_lifetime` applies for tokens that can be renewed
+        # using a refresh token, as per MSC2918.
+        # If it is `None`, the refresh token mechanism is disabled.
+        refreshable_access_token_lifetime = config.get(
+            "refreshable_access_token_lifetime",
+            "5m",
+        )
+        if refreshable_access_token_lifetime is not None:
+            refreshable_access_token_lifetime = self.parse_duration(
+                refreshable_access_token_lifetime
+            )
+        self.refreshable_access_token_lifetime: Optional[
+            int
+        ] = refreshable_access_token_lifetime
+
+        if (
+            self.session_lifetime is not None
+            and "refreshable_access_token_lifetime" in config
+        ):
+            if self.session_lifetime < self.refreshable_access_token_lifetime:
+                raise ConfigError(
+                    "Both `session_lifetime` and `refreshable_access_token_lifetime` "
+                    "configuration options have been set, but `refreshable_access_token_lifetime` "
+                    " exceeds `session_lifetime`!"
+                )
+
+        # The `nonrefreshable_access_token_lifetime` applies for tokens that can NOT be
+        # refreshed using a refresh token.
+        # If it is None, then these tokens last for the entire length of the session,
+        # which is infinite by default.
+        # The intention behind this configuration option is to help with requiring
+        # all clients to use refresh tokens, if the homeserver administrator requires.
+        nonrefreshable_access_token_lifetime = config.get(
+            "nonrefreshable_access_token_lifetime",
+            None,
+        )
+        if nonrefreshable_access_token_lifetime is not None:
+            nonrefreshable_access_token_lifetime = self.parse_duration(
+                nonrefreshable_access_token_lifetime
+            )
+        self.nonrefreshable_access_token_lifetime = nonrefreshable_access_token_lifetime
+
+        if (
+            self.session_lifetime is not None
+            and self.nonrefreshable_access_token_lifetime is not None
+        ):
+            if self.session_lifetime < self.nonrefreshable_access_token_lifetime:
+                raise ConfigError(
+                    "Both `session_lifetime` and `nonrefreshable_access_token_lifetime` "
+                    "configuration options have been set, but `nonrefreshable_access_token_lifetime` "
+                    " exceeds `session_lifetime`!"
+                )
+
+        refresh_token_lifetime = config.get("refresh_token_lifetime")
+        if refresh_token_lifetime is not None:
+            refresh_token_lifetime = self.parse_duration(refresh_token_lifetime)
+        self.refresh_token_lifetime: Optional[int] = refresh_token_lifetime
+
+        if (
+            self.session_lifetime is not None
+            and self.refresh_token_lifetime is not None
+        ):
+            if self.session_lifetime < self.refresh_token_lifetime:
+                raise ConfigError(
+                    "Both `session_lifetime` and `refresh_token_lifetime` "
+                    "configuration options have been set, but `refresh_token_lifetime` "
+                    " exceeds `session_lifetime`!"
+                )
+
+        # The fallback template used for authenticating using a registration token
+        self.registration_token_template = self.read_template("registration_token.html")
+
         # The success template used during fallback auth.
         self.fallback_success_template = self.read_template("auth_success.html")
 
@@ -208,69 +209,6 @@ class RegistrationConfig(Config):
         #
         #enable_registration: false
 
-        # Optional account validity configuration. This allows for accounts to be denied
-        # any request after a given period.
-        #
-        # Once this feature is enabled, Synapse will look for registered users without an
-        # expiration date at startup and will add one to every account it found using the
-        # current settings at that time.
-        # This means that, if a validity period is set, and Synapse is restarted (it will
-        # then derive an expiration date from the current validity period), and some time
-        # after that the validity period changes and Synapse is restarted, the users'
-        # expiration dates won't be updated unless their account is manually renewed. This
-        # date will be randomly selected within a range [now + period - d ; now + period],
-        # where d is equal to 10%% of the validity period.
-        #
-        account_validity:
-          # The account validity feature is disabled by default. Uncomment the
-          # following line to enable it.
-          #
-          #enabled: true
-
-          # The period after which an account is valid after its registration. When
-          # renewing the account, its validity period will be extended by this amount
-          # of time. This parameter is required when using the account validity
-          # feature.
-          #
-          #period: 6w
-
-          # The amount of time before an account's expiry date at which Synapse will
-          # send an email to the account's email address with a renewal link. By
-          # default, no such emails are sent.
-          #
-          # If you enable this setting, you will also need to fill out the 'email' and
-          # 'public_baseurl' configuration sections.
-          #
-          #renew_at: 1w
-
-          # The subject of the email sent out with the renewal link. '%%(app)s' can be
-          # used as a placeholder for the 'app_name' parameter from the 'email'
-          # section.
-          #
-          # Note that the placeholder must be written '%%(app)s', including the
-          # trailing 's'.
-          #
-          # If this is not set, a default value is used.
-          #
-          #renew_email_subject: "Renew your %%(app)s account"
-
-          # Directory in which Synapse will try to find templates for the HTML files to
-          # serve to the user when trying to renew an account. If not set, default
-          # templates from within the Synapse package will be used.
-          #
-          #template_dir: "res/templates"
-
-          # File within 'template_dir' giving the HTML to be displayed to the user after
-          # they successfully renewed their account. If not set, default text is used.
-          #
-          #account_renewed_html_path: "account_renewed.html"
-
-          # File within 'template_dir' giving the HTML to be displayed when the user
-          # tries to renew an account with an invalid renewal token. If not set,
-          # default text is used.
-          #
-          #invalid_token_html_path: "invalid_token.html"
-
         # Time that a user's session remains valid for, after they log in.
         #
         # Note that this is not currently compatible with guest logins.
@@ -281,6 +219,44 @@ class RegistrationConfig(Config):
         # By default, this is infinite.
         #
         #session_lifetime: 24h
+
+        # Time that an access token remains valid for, if the session is
+        # using refresh tokens.
+        # For more information about refresh tokens, please see the manual.
+        # Note that this only applies to clients which advertise support for
+        # refresh tokens.
+        #
+        # Note also that this is calculated at login time and refresh time:
+        # changes are not applied to existing sessions until they are refreshed.
+        #
+        # By default, this is 5 minutes.
+        #
+        #refreshable_access_token_lifetime: 5m
+
+        # Time that a refresh token remains valid for (provided that it is not
+        # exchanged for another one first).
+        # This option can be used to automatically log-out inactive sessions.
+        # Please see the manual for more information.
+        #
+        # Note also that this is calculated at login time and refresh time:
+        # changes are not applied to existing sessions until they are refreshed.
+        #
+        # By default, this is infinite.
+        #
+        #refresh_token_lifetime: 24h
+
+        # Time that an access token remains valid for, if the session is NOT
+        # using refresh tokens.
+        # Please note that not all clients support refresh tokens, so setting
+        # this to a short value may be inconvenient for some users who will
+        # then be logged out frequently.
+        #
+        # Note also that this is calculated at login time: changes are not applied
+        # retrospectively to existing sessions for users that have already logged in.
+        #
+        # By default, this is infinite.
+        #
+        #nonrefreshable_access_token_lifetime: 24h
 
         # The user must provide all of the below types of 3PID when registering.
         #
@@ -298,15 +274,24 @@ class RegistrationConfig(Config):
         #
         #allowed_local_3pids:
         #  - medium: email
-        #    pattern: '.*@matrix\\.org'
+        #    pattern: '^[^@]+@matrix\\.org$'
         #  - medium: email
-        #    pattern: '.*@vector\\.im'
+        #    pattern: '^[^@]+@vector\\.im$'
         #  - medium: msisdn
         #    pattern: '\\+44'
 
         # Enable 3PIDs lookup requests to identity servers from this server.
         #
         #enable_3pid_lookup: true
+
+        # Require users to submit a token during registration.
+        # Tokens can be managed using the admin API:
+        # https://matrix-org.github.io/synapse/latest/usage/administration/admin_api/registration_tokens.html
+        # Note that `enable_registration` must be set to `true`.
+        # Disabling this option will not delete any tokens previously generated.
+        # Defaults to false. Uncomment the following to require tokens:
+        #
+        #registration_requires_token: true
 
         # If set, allows registration of standard or admin accounts by anyone who
         # has the shared secret, even if registration is otherwise disabled.
@@ -331,7 +316,7 @@ class RegistrationConfig(Config):
         # in on this server.
         #
         # (By default, no suggestion is made, so it is left up to the client.
-        # This setting is ignored unless public_baseurl is also set.)
+        # This setting is ignored unless public_baseurl is also explicitly set.)
         #
         #default_identity_server: https://matrix.org
 
@@ -355,8 +340,6 @@ class RegistrationConfig(Config):
         # Servers handling the these requests must answer the `/requestToken` endpoints defined
         # by the Matrix Identity Service API specification:
         # https://matrix.org/docs/spec/identity_service/latest
-        #
-        # If a delegate is specified, the config option public_baseurl must also be filled out.
         #
         account_threepid_delegates:
             #email: https://example.com     # Delegate email sending to example.com
@@ -468,7 +451,7 @@ class RegistrationConfig(Config):
         )
 
     @staticmethod
-    def add_arguments(parser):
+    def add_arguments(parser: argparse.ArgumentParser) -> None:
         reg_group = parser.add_argument_group("registration")
         reg_group.add_argument(
             "--enable-registration",
@@ -477,6 +460,6 @@ class RegistrationConfig(Config):
             help="Enable registration for new users.",
         )
 
-    def read_arguments(self, args):
+    def read_arguments(self, args: argparse.Namespace) -> None:
         if args.enable_registration is not None:
-            self.enable_registration = bool(strtobool(str(args.enable_registration)))
+            self.enable_registration = strtobool(str(args.enable_registration))

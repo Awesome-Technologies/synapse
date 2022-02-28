@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
 # Copyright 2019 New Vector Ltd
 #
@@ -15,7 +14,7 @@
 # limitations under the License.
 import heapq
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Optional, Tuple, Type
 
 import attr
 
@@ -66,7 +65,7 @@ class BaseEventsStreamRow:
     """
 
     # Unique string that ids the type. Must be overridden in sub classes.
-    TypeId = None  # type: str
+    TypeId: str
 
     @classmethod
     def from_data(cls, data):
@@ -104,10 +103,10 @@ class EventsStreamCurrentStateRow(BaseEventsStreamRow):
     event_id = attr.ib()  # str, optional
 
 
-_EventRows = (
+_EventRows: Tuple[Type[BaseEventsStreamRow], ...] = (
     EventsStreamEventRow,
     EventsStreamCurrentStateRow,
-)  # type: Tuple[Type[BaseEventsStreamRow], ...]
+)
 
 TypeToRow = {Row.TypeId: Row for Row in _EventRows}
 
@@ -160,7 +159,7 @@ class EventsStream(Stream):
 
         event_rows = await self._store.get_all_new_forward_event_rows(
             instance_name, from_token, current_token, target_row_count
-        )  # type: List[Tuple]
+        )
 
         # we rely on get_all_new_forward_event_rows strictly honouring the limit, so
         # that we know it is safe to just take upper_limit = event_rows[-1][0].
@@ -173,7 +172,7 @@ class EventsStream(Stream):
 
         if len(event_rows) == target_row_count:
             limited = True
-            upper_limit = event_rows[-1][0]  # type: int
+            upper_limit: int = event_rows[-1][0]
         else:
             limited = False
             upper_limit = current_token
@@ -194,28 +193,28 @@ class EventsStream(Stream):
 
         ex_outliers_rows = await self._store.get_ex_outlier_stream_rows(
             instance_name, from_token, upper_limit
-        )  # type: List[Tuple]
+        )
 
         # we now need to turn the raw database rows returned into tuples suitable
         # for the replication protocol (basically, we add an identifier to
         # distinguish the row type). At the same time, we can limit the event_rows
         # to the max stream_id from state_rows.
 
-        event_updates = (
+        event_updates: Iterable[Tuple[int, Tuple]] = (
             (stream_id, (EventsStreamEventRow.TypeId, rest))
             for (stream_id, *rest) in event_rows
             if stream_id <= upper_limit
-        )  # type: Iterable[Tuple[int, Tuple]]
+        )
 
-        state_updates = (
+        state_updates: Iterable[Tuple[int, Tuple]] = (
             (stream_id, (EventsStreamCurrentStateRow.TypeId, rest))
             for (stream_id, *rest) in state_rows
-        )  # type: Iterable[Tuple[int, Tuple]]
+        )
 
-        ex_outliers_updates = (
+        ex_outliers_updates: Iterable[Tuple[int, Tuple]] = (
             (stream_id, (EventsStreamEventRow.TypeId, rest))
             for (stream_id, *rest) in ex_outliers_rows
-        )  # type: Iterable[Tuple[int, Tuple]]
+        )
 
         # we need to return a sorted list, so merge them together.
         updates = list(heapq.merge(event_updates, state_updates, ex_outliers_updates))

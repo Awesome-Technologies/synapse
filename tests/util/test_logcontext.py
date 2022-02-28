@@ -17,11 +17,10 @@ from .. import unittest
 
 class LoggingContextTestCase(unittest.TestCase):
     def _check_test_key(self, value):
-        self.assertEquals(current_context().request, value)
+        self.assertEquals(current_context().name, value)
 
     def test_with_context(self):
-        with LoggingContext() as context_one:
-            context_one.request = "test"
+        with LoggingContext("test"):
             self._check_test_key("test")
 
     @defer.inlineCallbacks
@@ -30,15 +29,13 @@ class LoggingContextTestCase(unittest.TestCase):
 
         @defer.inlineCallbacks
         def competing_callback():
-            with LoggingContext() as competing_context:
-                competing_context.request = "competing"
+            with LoggingContext("competing"):
                 yield clock.sleep(0)
                 self._check_test_key("competing")
 
         reactor.callLater(0, competing_callback)
 
-        with LoggingContext() as context_one:
-            context_one.request = "one"
+        with LoggingContext("one"):
             yield clock.sleep(0)
             self._check_test_key("one")
 
@@ -47,9 +44,7 @@ class LoggingContextTestCase(unittest.TestCase):
 
         callback_completed = [False]
 
-        with LoggingContext() as context_one:
-            context_one.request = "one"
-
+        with LoggingContext("one"):
             # fire off function, but don't wait on it.
             d2 = run_in_background(function)
 
@@ -133,9 +128,7 @@ class LoggingContextTestCase(unittest.TestCase):
 
         sentinel_context = current_context()
 
-        with LoggingContext() as context_one:
-            context_one.request = "one"
-
+        with LoggingContext("one"):
             d1 = make_deferred_yieldable(blocking_function())
             # make sure that the context was reset by make_deferred_yieldable
             self.assertIs(current_context(), sentinel_context)
@@ -149,9 +142,7 @@ class LoggingContextTestCase(unittest.TestCase):
     def test_make_deferred_yieldable_with_chained_deferreds(self):
         sentinel_context = current_context()
 
-        with LoggingContext() as context_one:
-            context_one.request = "one"
-
+        with LoggingContext("one"):
             d1 = make_deferred_yieldable(_chained_deferred_function())
             # make sure that the context was reset by make_deferred_yieldable
             self.assertIs(current_context(), sentinel_context)
@@ -161,49 +152,10 @@ class LoggingContextTestCase(unittest.TestCase):
             # now it should be restored
             self._check_test_key("one")
 
-    @defer.inlineCallbacks
-    def test_make_deferred_yieldable_on_non_deferred(self):
-        """Check that make_deferred_yieldable does the right thing when its
-        argument isn't actually a deferred"""
-
-        with LoggingContext() as context_one:
-            context_one.request = "one"
-
-            d1 = make_deferred_yieldable("bum")
-            self._check_test_key("one")
-
-            r = yield d1
-            self.assertEqual(r, "bum")
-            self._check_test_key("one")
-
     def test_nested_logging_context(self):
-        with LoggingContext(request="foo"):
+        with LoggingContext("foo"):
             nested_context = nested_logging_context(suffix="bar")
-            self.assertEqual(nested_context.request, "foo-bar")
-
-    @defer.inlineCallbacks
-    def test_make_deferred_yieldable_with_await(self):
-        # an async function which returns an incomplete coroutine, but doesn't
-        # follow the synapse rules.
-
-        async def blocking_function():
-            d = defer.Deferred()
-            reactor.callLater(0, d.callback, None)
-            await d
-
-        sentinel_context = current_context()
-
-        with LoggingContext() as context_one:
-            context_one.request = "one"
-
-            d1 = make_deferred_yieldable(blocking_function())
-            # make sure that the context was reset by make_deferred_yieldable
-            self.assertIs(current_context(), sentinel_context)
-
-            yield d1
-
-            # now it should be restored
-            self._check_test_key("one")
+            self.assertEqual(nested_context.name, "foo-bar")
 
 
 # a function which returns a deferred which has been "called", but

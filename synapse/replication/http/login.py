@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +13,13 @@
 # limitations under the License.
 
 import logging
+from typing import TYPE_CHECKING
 
 from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +34,39 @@ class RegisterDeviceReplicationServlet(ReplicationEndpoint):
     NAME = "device_check_registered"
     PATH_ARGS = ("user_id",)
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
         self.registration_handler = hs.get_registration_handler()
 
     @staticmethod
     async def _serialize_payload(
-        user_id, device_id, initial_display_name, is_guest, is_appservice_ghost
+        user_id,
+        device_id,
+        initial_display_name,
+        is_guest,
+        is_appservice_ghost,
+        should_issue_refresh_token,
+        auth_provider_id,
+        auth_provider_session_id,
     ):
         """
         Args:
+            user_id (int)
             device_id (str|None): Device ID to use, if None a new one is
                 generated.
             initial_display_name (str|None)
             is_guest (bool)
+            is_appservice_ghost (bool)
+            should_issue_refresh_token (bool)
         """
         return {
             "device_id": device_id,
             "initial_display_name": initial_display_name,
             "is_guest": is_guest,
             "is_appservice_ghost": is_appservice_ghost,
+            "should_issue_refresh_token": should_issue_refresh_token,
+            "auth_provider_id": auth_provider_id,
+            "auth_provider_session_id": auth_provider_session_id,
         }
 
     async def _handle_request(self, request, user_id):
@@ -60,17 +76,23 @@ class RegisterDeviceReplicationServlet(ReplicationEndpoint):
         initial_display_name = content["initial_display_name"]
         is_guest = content["is_guest"]
         is_appservice_ghost = content["is_appservice_ghost"]
+        should_issue_refresh_token = content["should_issue_refresh_token"]
+        auth_provider_id = content["auth_provider_id"]
+        auth_provider_session_id = content["auth_provider_session_id"]
 
-        device_id, access_token = await self.registration_handler.register_device(
+        res = await self.registration_handler.register_device_inner(
             user_id,
             device_id,
             initial_display_name,
             is_guest,
             is_appservice_ghost=is_appservice_ghost,
+            should_issue_refresh_token=should_issue_refresh_token,
+            auth_provider_id=auth_provider_id,
+            auth_provider_session_id=auth_provider_session_id,
         )
 
-        return 200, {"device_id": device_id, "access_token": access_token}
+        return 200, res
 
 
-def register_servlets(hs, http_server):
+def register_servlets(hs: "HomeServer", http_server):
     RegisterDeviceReplicationServlet(hs).register(http_server)

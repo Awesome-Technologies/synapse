@@ -3,6 +3,7 @@
 import codecs
 import glob
 import os
+import platform
 import subprocess
 import sys
 
@@ -119,6 +120,7 @@ def generate_config_from_template(config_dir, config_path, environ, ownership):
     ]
 
     if ownership is not None:
+        log(f"Setting ownership on /data to {ownership}")
         subprocess.check_output(["chown", "-R", ownership, "/data"])
         args = ["gosu", ownership] + args
 
@@ -143,12 +145,18 @@ def run_generate_config(environ, ownership):
     config_path = environ.get("SYNAPSE_CONFIG_PATH", config_dir + "/homeserver.yaml")
     data_dir = environ.get("SYNAPSE_DATA_DIR", "/data")
 
+    if ownership is not None:
+        # make sure that synapse has perms to write to the data dir.
+        log(f"Setting ownership on {data_dir} to {ownership}")
+        subprocess.check_output(["chown", ownership, data_dir])
+
     # create a suitable log config from our template
     log_config_file = "%s/%s.log.config" % (config_dir, server_name)
     if not os.path.exists(log_config_file):
         log("Creating log config %s" % (log_config_file,))
         convert("/conf/log.config", log_config_file, environ)
 
+    # generate the main config file, and a signing key.
     args = [
         "python",
         "-m",
@@ -167,29 +175,23 @@ def run_generate_config(environ, ownership):
         "--open-private-ports",
     ]
     # log("running %s" % (args, ))
-
-    if ownership is not None:
-        # make sure that synapse has perms to write to the data dir.
-        subprocess.check_output(["chown", ownership, data_dir])
-
-        args = ["gosu", ownership] + args
-        os.execv("/usr/sbin/gosu", args)
-    else:
-        os.execv("/usr/local/bin/python", args)
+    os.execv("/usr/local/bin/python", args)
 
 
 def main(args, environ):
     mode = args[1] if len(args) > 1 else "run"
-    desired_uid = int(environ.get("UID", "991"))
-    desired_gid = int(environ.get("GID", "991"))
-    synapse_worker = environ.get("SYNAPSE_WORKER", "synapse.app.homeserver")
-    if (desired_uid == os.getuid()) and (desired_gid == os.getgid()):
-        ownership = None
-    else:
-        ownership = "{}:{}".format(desired_uid, desired_gid)
 
-    if ownership is None:
-        log("Will not perform chmod/gosu as UserID already matches request")
+    # if we were given an explicit user to switch to, do so
+    ownership = None
+    if "UID" in environ:
+        desired_uid = int(environ["UID"])
+        desired_gid = int(environ.get("GID", "991"))
+        ownership = f"{desired_uid}:{desired_gid}"
+    elif os.getuid() == 0:
+        # otherwise, if we are running as root, use user 991
+        ownership = "991:991"
+
+    synapse_worker = environ.get("SYNAPSE_WORKER", "synapse.app.homeserver")
 
     # In generate mode, generate a configuration and missing keys, then exit
     if mode == "generate":
@@ -212,6 +214,13 @@ def main(args, environ):
 
     if "-m" not in args:
         args = ["-m", synapse_worker] + args
+
+    jemallocpath = "/usr/lib/%s-linux-gnu/libjemalloc.so.2" % (platform.machine(),)
+
+    if os.path.isfile(jemallocpath):
+        environ["LD_PRELOAD"] = jemallocpath
+    else:
+        log("Could not find %s, will not use" % (jemallocpath,))
 
     # if there are no config files passed to synapse, try adding the default file
     if not any(p.startswith("--config-path") or p.startswith("-c") for p in args):
@@ -248,9 +257,9 @@ running with 'migrate_config'. See the README for more details.
     args = ["python"] + args
     if ownership is not None:
         args = ["gosu", ownership] + args
-        os.execv("/usr/sbin/gosu", args)
+        os.execve("/usr/sbin/gosu", args, environ)
     else:
-        os.execv("/usr/local/bin/python", args)
+        os.execve("/usr/local/bin/python", args, environ)
 
 
 if __name__ == "__main__":

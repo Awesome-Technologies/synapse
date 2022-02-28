@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
@@ -16,28 +15,42 @@
 import heapq
 from itertools import islice
 from typing import (
+    Collection,
     Dict,
     Generator,
     Iterable,
     Iterator,
     Mapping,
-    Sequence,
     Set,
+    Sized,
     Tuple,
     TypeVar,
 )
 
-from synapse.types import Collection
+from typing_extensions import Protocol
 
 T = TypeVar("T")
+S = TypeVar("S", bound="_SelfSlice")
 
 
-def batch_iter(iterable: Iterable[T], size: int) -> Iterator[Tuple[T]]:
+class _SelfSlice(Sized, Protocol):
+    """A helper protocol that matches types where taking a slice results in the
+    same type being returned.
+
+    This is more specific than `Sequence`, which allows another `Sequence` to be
+    returned.
+    """
+
+    def __getitem__(self: S, i: slice) -> S:
+        ...
+
+
+def batch_iter(iterable: Iterable[T], size: int) -> Iterator[Tuple[T, ...]]:
     """batch an iterable up into tuples with a maximum size
 
     Args:
-        iterable (iterable): the iterable to slice
-        size (int): the maximum batch size
+        iterable: the iterable to slice
+        size: the maximum batch size
 
     Returns:
         an iterator over the chunks
@@ -48,10 +61,7 @@ def batch_iter(iterable: Iterable[T], size: int) -> Iterator[Tuple[T]]:
     return iter(lambda: tuple(islice(sourceiter, size)), ())
 
 
-ISeq = TypeVar("ISeq", bound=Sequence, covariant=True)
-
-
-def chunk_seq(iseq: ISeq, maxlen: int) -> Iterable[ISeq]:
+def chunk_seq(iseq: S, maxlen: int) -> Iterator[S]:
     """Split the given sequence into chunks of the given size
 
     The last chunk may be shorter than the given size.
@@ -73,7 +83,7 @@ def sorted_topologically(
     # This is implemented by Kahn's algorithm.
 
     degree_map = {node: 0 for node in nodes}
-    reverse_graph = {}  # type: Dict[T, Set[T]]
+    reverse_graph: Dict[T, Set[T]] = {}
 
     for node, edges in graph.items():
         if node not in degree_map:

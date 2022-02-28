@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from typing import TYPE_CHECKING
 
 from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.events import make_event_from_dict
@@ -22,6 +22,9 @@ from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
 from synapse.types import Requester, UserID
 from synapse.util.metrics import Measure
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
                                 // containing the event
             "event_format_version": .., // 1,2,3 etc: the event format version
             "internal_metadata": { .. serialized internal_metadata .. },
+            "outlier": true|false,
             "rejected_reason": ..,   // The event.rejected_reason field
             "context": { .. serialized event context .. },
             "requester": { .. serialized requester .. },
@@ -57,7 +61,7 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
     NAME = "send_event"
     PATH_ARGS = ("event_id",)
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
 
         self.event_creation_handler = hs.get_event_creation_handler()
@@ -79,7 +83,6 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
             ratelimit (bool)
             extra_users (list(UserID)): Any extra users to notify about event
         """
-
         serialized_context = await context.serialize(event, store)
 
         payload = {
@@ -87,6 +90,7 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
             "room_version": event.room_version.identifier,
             "event_format_version": event.format_version,
             "internal_metadata": event.internal_metadata.get_dict(),
+            "outlier": event.internal_metadata.is_outlier(),
             "rejected_reason": event.rejected_reason,
             "context": serialized_context,
             "requester": requester.serialize(),
@@ -108,6 +112,7 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
             event = make_event_from_dict(
                 event_dict, room_ver, internal_metadata, rejected_reason
             )
+            event.internal_metadata.outlier = content["outlier"]
 
             requester = Requester.deserialize(self.store, content["requester"])
             context = EventContext.deserialize(self.storage, content["context"])
@@ -134,5 +139,5 @@ class ReplicationSendEventRestServlet(ReplicationEndpoint):
         )
 
 
-def register_servlets(hs, http_server):
+def register_servlets(hs: "HomeServer", http_server):
     ReplicationSendEventRestServlet(hs).register(http_server)

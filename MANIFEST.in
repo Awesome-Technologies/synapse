@@ -8,6 +8,7 @@ include demo/demo.tls.dh
 include demo/*.py
 include demo/*.sh
 
+include synapse/py.typed
 recursive-include synapse/storage *.sql
 recursive-include synapse/storage *.sql.postgres
 recursive-include synapse/storage *.sql.sqlite
@@ -20,9 +21,10 @@ recursive-include scripts *
 recursive-include scripts-dev *
 recursive-include synapse *.pyi
 recursive-include tests *.py
-include tests/http/ca.crt
-include tests/http/ca.key
-include tests/http/server.key
+recursive-include tests *.pem
+recursive-include tests *.p8
+recursive-include tests *.crt
+recursive-include tests *.key
 
 recursive-include synapse/res *
 recursive-include synapse/static *.css
@@ -39,12 +41,13 @@ exclude mypy.ini
 exclude sytest-blacklist
 exclude test_postgresql.sh
 
+include book.toml
 include pyproject.toml
 recursive-include changelog.d *
 
-prune .buildkite
 prune .circleci
 prune .github
+prune .ci
 prune contrib
 prune debian
 prune demo/etc

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from synapse.storage.databases.main.e2e_room_keys import RoomKey
+
 from tests import unittest
 
 # sample room_key data for use in the tests
-room_key = {
+room_key: RoomKey = {
     "first_message_index": 1,
     "forwarded_count": 1,
     "is_verified": False,

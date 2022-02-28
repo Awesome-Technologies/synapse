@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,9 +14,11 @@
 
 import logging
 from functools import wraps
-from typing import Any, Callable, Optional, TypeVar, cast
+from types import TracebackType
+from typing import Any, Callable, Optional, Type, TypeVar, cast
 
 from prometheus_client import Counter
+from typing_extensions import Protocol
 
 from synapse.logging.context import (
     ContextResourceUsage,
@@ -25,6 +26,7 @@ from synapse.logging.context import (
     current_context,
 )
 from synapse.metrics import InFlightGauge
+from synapse.util import Clock
 
 logger = logging.getLogger(__name__)
 
@@ -54,15 +56,27 @@ block_db_sched_duration = Counter(
     "synapse_util_metrics_block_db_sched_duration_seconds", "", ["block_name"]
 )
 
+
+# This is dynamically created in InFlightGauge.__init__.
+class _InFlightMetric(Protocol):
+    real_time_max: float
+    real_time_sum: float
+
+
 # Tracks the number of blocks currently active
-in_flight = InFlightGauge(
+in_flight: InFlightGauge[_InFlightMetric] = InFlightGauge(
     "synapse_util_metrics_block_in_flight",
     "",
     labels=["block_name"],
     sub_metrics=["real_time_max", "real_time_sum"],
 )
 
+
 T = TypeVar("T", bound=Callable[..., Any])
+
+
+class HasClock(Protocol):
+    clock: Clock
 
 
 def measure_func(name: Optional[str] = None) -> Callable[[T], T]:
@@ -87,7 +101,7 @@ def measure_func(name: Optional[str] = None) -> Callable[[T], T]:
         block_name = func.__name__ if name is None else name
 
         @wraps(func)
-        async def measured_func(self, *args, **kwargs):
+        async def measured_func(self: HasClock, *args: Any, **kwargs: Any) -> Any:
             with Measure(self.clock, block_name):
                 r = await func(self, *args, **kwargs)
             return r
@@ -105,7 +119,13 @@ class Measure:
         "start",
     ]
 
-    def __init__(self, clock, name):
+    def __init__(self, clock: Clock, name: str) -> None:
+        """
+        Args:
+            clock: An object with a "time()" method, which returns the current
+                time in seconds.
+            name: The name of the metric to report.
+        """
         self.clock = clock
         self.name = name
         curr_context = current_context()
@@ -118,10 +138,8 @@ class Measure:
         else:
             assert isinstance(curr_context, LoggingContext)
             parent_context = curr_context
-        self._logging_context = LoggingContext(
-            "Measure[%s]" % (self.name,), parent_context
-        )
-        self.start = None
+        self._logging_context = LoggingContext(str(curr_context), parent_context)
+        self.start: Optional[float] = None
 
     def __enter__(self) -> "Measure":
         if self.start is not None:
@@ -130,11 +148,21 @@ class Measure:
         self.start = self.clock.time()
         self._logging_context.__enter__()
         in_flight.register((self.name,), self._update_in_flight)
+
+        logger.debug("Entering block %s", self.name)
+
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         if self.start is None:
             raise RuntimeError("Measure() block exited without being entered")
+
+        logger.debug("Exiting block %s", self.name)
 
         duration = self.clock.time() - self.start
         usage = self.get_resource_usage()
@@ -160,8 +188,9 @@ class Measure:
         """
         return self._logging_context.get_resource_usage()
 
-    def _update_in_flight(self, metrics):
+    def _update_in_flight(self, metrics: _InFlightMetric) -> None:
         """Gets called when processing in flight metrics"""
+        assert self.start is not None
         duration = self.clock.time() - self.start
 
         metrics.real_time_max = max(metrics.real_time_max, duration)

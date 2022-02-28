@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014 - 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import pymacaroons
 from netaddr import IPAddress
 
 from twisted.web.server import Request
 
-import synapse.types
 from synapse import event_auth
 from synapse.api.auth_blocking import AuthBlocking
 from synapse.api.constants import EventTypes, HistoryVisibility, Membership
@@ -30,28 +28,21 @@ from synapse.api.errors import (
     InvalidClientTokenError,
     MissingClientTokenError,
 )
-from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.appservice import ApplicationService
 from synapse.events import EventBase
 from synapse.http import get_request_user_agent
 from synapse.http.site import SynapseRequest
-from synapse.logging import opentracing as opentracing
+from synapse.logging.opentracing import active_span, force_tracing, start_active_span
 from synapse.storage.databases.main.registration import TokenLookupResult
-from synapse.types import StateMap, UserID
+from synapse.types import Requester, StateMap, UserID, create_requester
 from synapse.util.caches.lrucache import LruCache
-from synapse.util.metrics import Measure
+from synapse.util.macaroons import get_value_from_macaroon, satisfy_expiry
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
-
-AuthEventTypes = (
-    EventTypes.Create,
-    EventTypes.Member,
-    EventTypes.PowerLevels,
-    EventTypes.JoinRules,
-    EventTypes.RoomHistoryVisibility,
-    EventTypes.ThirdPartyInvite,
-)
 
 # guests always get this device id.
 GUEST_DEVICE_ID = "guest_device"
@@ -63,25 +54,25 @@ class _InvalidMacaroonException(Exception):
 
 class Auth:
     """
-    FIXME: This class contains a mix of functions for authenticating users
-    of our client-server API and authenticating events added to room graphs.
+    This class contains functions for authenticating users of our client-server API.
     """
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         self.hs = hs
         self.clock = hs.get_clock()
         self.store = hs.get_datastore()
         self.state = hs.get_state_handler()
+        self._account_validity_handler = hs.get_account_validity_handler()
 
-        self.token_cache = LruCache(
+        self.token_cache: LruCache[str, Tuple[str, bool]] = LruCache(
             10000, "token_cache"
-        )  # type: LruCache[str, Tuple[str, bool]]
+        )
 
         self._auth_blocking = AuthBlocking(self.hs)
 
-        self._account_validity = hs.config.account_validity
-        self._track_appservice_user_ips = hs.config.track_appservice_user_ips
-        self._macaroon_secret_key = hs.config.macaroon_secret_key
+        self._track_appservice_user_ips = hs.config.appservice.track_appservice_user_ips
+        self._macaroon_secret_key = hs.config.key.macaroon_secret_key
+        self._force_tracing_for_users = hs.config.tracing.force_tracing_for_users
 
     async def check_from_context(
         self, room_version: str, event, context, do_sig_check=True
@@ -165,27 +156,14 @@ class Auth:
 
         raise AuthError(403, "User %s not in room %s" % (user_id, room_id))
 
-    async def check_host_in_room(self, room_id, host):
-        with Measure(self.clock, "check_host_in_room"):
-            latest_event_ids = await self.store.is_host_joined(room_id, host)
-            return latest_event_ids
-
-    def can_federate(self, event, auth_events):
-        creation_event = auth_events.get((EventTypes.Create, ""))
-
-        return creation_event.content.get("m.federate", True) is True
-
-    def get_public_keys(self, invite_event):
-        return event_auth.get_public_keys(invite_event)
-
     async def get_user_by_req(
         self,
-        request: Request,
+        request: SynapseRequest,
         allow_guest: bool = False,
         rights: str = "access",
         allow_expired: bool = False,
         allow_limited: bool = True,
-    ) -> synapse.types.Requester:
+    ) -> Requester:
         """Get a registered user's ID.
 
         Args:
@@ -206,32 +184,70 @@ class Auth:
                 is invalid.
             AuthError if access is denied for the user in the access token
         """
+        parent_span = active_span()
+        with start_active_span("get_user_by_req"):
+            requester = await self._wrapped_get_user_by_req(
+                request, allow_guest, rights, allow_expired
+            )
+
+            if parent_span:
+                if requester.authenticated_entity in self._force_tracing_for_users:
+                    # request tracing is enabled for this user, so we need to force it
+                    # tracing on for the parent span (which will be the servlet span).
+                    #
+                    # It's too late for the get_user_by_req span to inherit the setting,
+                    # so we also force it on for that.
+                    force_tracing()
+                    force_tracing(parent_span)
+                parent_span.set_tag(
+                    "authenticated_entity", requester.authenticated_entity
+                )
+                parent_span.set_tag("user_id", requester.user.to_string())
+                if requester.device_id is not None:
+                    parent_span.set_tag("device_id", requester.device_id)
+                if requester.app_service is not None:
+                    parent_span.set_tag("appservice_id", requester.app_service.id)
+            return requester
+
+    async def _wrapped_get_user_by_req(
+        self,
+        request: SynapseRequest,
+        allow_guest: bool,
+        rights: str,
+        allow_expired: bool,
+    ) -> Requester:
+        """Helper for get_user_by_req
+
+        Once get_user_by_req has set up the opentracing span, this does the actual work.
+        """
         try:
             ip_addr = request.getClientIP()
             user_agent = get_request_user_agent(request)
 
             access_token = self.get_access_token_from_request(request)
 
-            user_id, app_service = await self._get_appservice_user_id(request)
-            if user_id:
+            (
+                user_id,
+                device_id,
+                app_service,
+            ) = await self._get_appservice_user_id_and_device_id(request)
+            if user_id and app_service:
                 if ip_addr and self._track_appservice_user_ips:
                     await self.store.insert_client_ip(
                         user_id=user_id,
                         access_token=access_token,
                         ip=ip_addr,
                         user_agent=user_agent,
-                        device_id="dummy-device",  # stubbed
+                        device_id="dummy-device"
+                        if device_id is None
+                        else device_id,  # stubbed
                     )
 
-                requester = synapse.types.create_requester(
-                    user_id, app_service=app_service
+                requester = create_requester(
+                    user_id, app_service=app_service, device_id=device_id
                 )
 
                 request.requester = user_id
-                opentracing.set_tag("authenticated_entity", user_id)
-                opentracing.set_tag("user_id", user_id)
-                opentracing.set_tag("appservice_id", app_service.id)
-
                 return requester
 
             user_info = await self.get_user_by_access_token(
@@ -242,12 +258,17 @@ class Auth:
             shadow_banned = user_info.shadow_banned
 
             # Deny the request if the user account has expired.
-            if self._account_validity.enabled and not allow_expired:
-                if await self.store.is_account_expired(
-                    user_info.user_id, self.clock.time_msec()
+            if not allow_expired:
+                if await self._account_validity_handler.is_user_expired(
+                    user_info.user_id
                 ):
+                    # Raise the error if either an account validity module has determined
+                    # the account has expired, or the legacy account validity
+                    # implementation is enabled and determined the account has expired
                     raise AuthError(
-                        403, "User account has expired", errcode=Codes.EXPIRED_ACCOUNT
+                        403,
+                        "User account has expired",
+                        errcode=Codes.EXPIRED_ACCOUNT,
                     )
 
             # Deny the request if the user is limited and access is forbidden for
@@ -281,7 +302,12 @@ class Auth:
                     errcode=Codes.GUEST_ACCESS_FORBIDDEN,
                 )
 
-            requester = synapse.types.create_requester(
+            # Mark the token as used. This is used to invalidate old refresh
+            # tokens after some time.
+            if not user_info.token_used and token_id is not None:
+                await self.store.mark_access_token_as_used(token_id)
+
+            requester = create_requester(
                 user_info.user_id,
                 token_id,
                 is_guest,
@@ -292,39 +318,116 @@ class Auth:
             )
 
             request.requester = requester
-            opentracing.set_tag("authenticated_entity", user_info.token_owner)
-            opentracing.set_tag("user_id", user_info.user_id)
-            if device_id:
-                opentracing.set_tag("device_id", device_id)
-
             return requester
         except KeyError:
             raise MissingClientTokenError()
 
-    async def _get_appservice_user_id(self, request):
+    async def validate_appservice_can_control_user_id(
+        self, app_service: ApplicationService, user_id: str
+    ) -> None:
+        """Validates that the app service is allowed to control
+        the given user.
+
+        Args:
+            app_service: The app service that controls the user
+            user_id: The author MXID that the app service is controlling
+
+        Raises:
+            AuthError: If the application service is not allowed to control the user
+                (user namespace regex does not match, wrong homeserver, etc)
+                or if the user has not been registered yet.
+        """
+
+        # It's ok if the app service is trying to use the sender from their registration
+        if app_service.sender == user_id:
+            pass
+        # Check to make sure the app service is allowed to control the user
+        elif not app_service.is_interested_in_user(user_id):
+            raise AuthError(
+                403,
+                "Application service cannot masquerade as this user (%s)." % user_id,
+            )
+        # Check to make sure the user is already registered on the homeserver
+        elif not (await self.store.get_user_by_id(user_id)):
+            raise AuthError(
+                403, "Application service has not registered this user (%s)" % user_id
+            )
+
+    async def _get_appservice_user_id_and_device_id(
+        self, request: Request
+    ) -> Tuple[Optional[str], Optional[str], Optional[ApplicationService]]:
+        """
+        Given a request, reads the request parameters to determine:
+        - whether it's an application service that's making this request
+        - what user the application service should be treated as controlling
+          (the user_id URI parameter allows an application service to masquerade
+          any applicable user in its namespace)
+        - what device the application service should be treated as controlling
+          (the device_id[^1] URI parameter allows an application service to masquerade
+          as any device that exists for the relevant user)
+
+        [^1] Unstable and provided by MSC3202.
+             Must use `org.matrix.msc3202.device_id` in place of `device_id` for now.
+
+        Returns:
+            3-tuple of
+            (user ID?, device ID?, application service?)
+
+        Postconditions:
+        - If an application service is returned, so is a user ID
+        - A user ID is never returned without an application service
+        - A device ID is never returned without a user ID or an application service
+        - The returned application service, if present, is permitted to control the
+          returned user ID.
+        - The returned device ID, if present, has been checked to be a valid device ID
+          for the returned user ID.
+        """
+        DEVICE_ID_ARG_NAME = b"org.matrix.msc3202.device_id"
+
         app_service = self.store.get_app_service_by_token(
             self.get_access_token_from_request(request)
         )
         if app_service is None:
-            return None, None
+            return None, None, None
 
         if app_service.ip_range_whitelist:
             ip_address = IPAddress(request.getClientIP())
             if ip_address not in app_service.ip_range_whitelist:
-                return None, None
+                return None, None, None
 
-        if b"user_id" not in request.args:
-            return app_service.sender, app_service
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
 
-        user_id = request.args[b"user_id"][0].decode("utf8")
-        if app_service.sender == user_id:
-            return app_service.sender, app_service
+        if b"user_id" in request.args:
+            effective_user_id = request.args[b"user_id"][0].decode("utf8")
+            await self.validate_appservice_can_control_user_id(
+                app_service, effective_user_id
+            )
+        else:
+            effective_user_id = app_service.sender
 
-        if not app_service.is_interested_in_user(user_id):
-            raise AuthError(403, "Application service cannot masquerade as this user.")
-        if not (await self.store.get_user_by_id(user_id)):
-            raise AuthError(403, "Application service has not registered this user")
-        return user_id, app_service
+        effective_device_id: Optional[str] = None
+
+        if (
+            self.hs.config.experimental.msc3202_device_masquerading_enabled
+            and DEVICE_ID_ARG_NAME in request.args
+        ):
+            effective_device_id = request.args[DEVICE_ID_ARG_NAME][0].decode("utf8")
+            # We only just set this so it can't be None!
+            assert effective_device_id is not None
+            device_opt = await self.store.get_device(
+                effective_user_id, effective_device_id
+            )
+            if device_opt is None:
+                # For now, use 400 M_EXCLUSIVE if the device doesn't exist.
+                # This is an open thread of discussion on MSC3202 as of 2021-12-09.
+                raise AuthError(
+                    400,
+                    f"Application service trying to use a device that doesn't exist ('{effective_device_id}' for {effective_user_id})",
+                    Codes.EXCLUSIVE,
+                )
+
+        return effective_user_id, effective_device_id, app_service
 
     async def get_user_by_access_token(
         self,
@@ -417,7 +520,9 @@ class Auth:
             logger.warning("Invalid macaroon in auth: %s %s", type(e), e)
             raise InvalidClientTokenError("Invalid macaroon passed.")
 
-    def _parse_and_validate_macaroon(self, token, rights="access"):
+    def _parse_and_validate_macaroon(
+        self, token: str, rights: str = "access"
+    ) -> Tuple[str, bool]:
         """Takes a macaroon and tries to parse and validate it. This is cached
         if and only if rights == access and there isn't an expiry.
 
@@ -441,7 +546,7 @@ class Auth:
             raise _InvalidMacaroonException()
 
         try:
-            user_id = self.get_user_id_from_macaroon(macaroon)
+            user_id = get_value_from_macaroon(macaroon, "user_id")
 
             guest = False
             for caveat in macaroon.caveats:
@@ -449,7 +554,12 @@ class Auth:
                     guest = True
 
             self.validate_macaroon(macaroon, rights, user_id=user_id)
-        except (pymacaroons.exceptions.MacaroonException, TypeError, ValueError):
+        except (
+            pymacaroons.exceptions.MacaroonException,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
             raise InvalidClientTokenError("Invalid macaroon passed.")
 
         if rights == "access":
@@ -457,36 +567,16 @@ class Auth:
 
         return user_id, guest
 
-    def get_user_id_from_macaroon(self, macaroon):
-        """Retrieve the user_id given by the caveats on the macaroon.
-
-        Does *not* validate the macaroon.
-
-        Args:
-            macaroon (pymacaroons.Macaroon): The macaroon to validate
-
-        Returns:
-            (str) user id
-
-        Raises:
-            InvalidClientCredentialsError if there is no user_id caveat in the
-                macaroon
-        """
-        user_prefix = "user_id = "
-        for caveat in macaroon.caveats:
-            if caveat.caveat_id.startswith(user_prefix):
-                return caveat.caveat_id[len(user_prefix) :]
-        raise InvalidClientTokenError("No user caveat in macaroon")
-
-    def validate_macaroon(self, macaroon, type_string, user_id):
+    def validate_macaroon(
+        self, macaroon: pymacaroons.Macaroon, type_string: str, user_id: str
+    ) -> None:
         """
         validate that a Macaroon is understood by and was signed by this server.
 
         Args:
-            macaroon(pymacaroons.Macaroon): The macaroon to validate
-            type_string(str): The kind of token required (e.g. "access",
-                              "delete_pusher")
-            user_id (str): The user_id required
+            macaroon: The macaroon to validate
+            type_string: The kind of token required (e.g. "access", "delete_pusher")
+            user_id: The user_id required
         """
         v = pymacaroons.Verifier()
 
@@ -498,20 +588,12 @@ class Auth:
         v.satisfy_exact("type = " + type_string)
         v.satisfy_exact("user_id = %s" % user_id)
         v.satisfy_exact("guest = true")
-        v.satisfy_general(self._verify_expiry)
+        satisfy_expiry(v, self.clock.time_msec)
 
         # access_tokens include a nonce for uniqueness: any value is acceptable
         v.satisfy_general(lambda c: c.startswith("nonce = "))
 
         v.verify(macaroon, self._macaroon_secret_key)
-
-    def _verify_expiry(self, caveat):
-        prefix = "time < "
-        if not caveat.startswith(prefix):
-            return False
-        expiry = int(caveat[len(prefix) :])
-        now = self.hs.get_clock().time_msec()
-        return now < expiry
 
     def get_appservice_by_req(self, request: SynapseRequest) -> ApplicationService:
         token = self.get_access_token_from_request(request)
@@ -519,9 +601,7 @@ class Auth:
         if not service:
             logger.warning("Unrecognised appservice access token.")
             raise InvalidClientTokenError()
-        request.requester = synapse.types.create_requester(
-            service.sender, app_service=service
-        )
+        request.requester = create_requester(service.sender, app_service=service)
         return service
 
     async def is_server_admin(self, user: UserID) -> bool:
@@ -588,7 +668,7 @@ class Auth:
 
         return auth_ids
 
-    async def check_can_change_room_list(self, room_id: str, user: UserID):
+    async def check_can_change_room_list(self, room_id: str, user: UserID) -> bool:
         """Determine whether the user is allowed to edit the room's entry in the
         published room list.
 
@@ -623,28 +703,33 @@ class Auth:
         return user_level >= send_level
 
     @staticmethod
-    def has_access_token(request: Request):
+    def has_access_token(request: Request) -> bool:
         """Checks if the request has an access_token.
 
         Returns:
-            bool: False if no access_token was given, True otherwise.
+            False if no access_token was given, True otherwise.
         """
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
+
         query_params = request.args.get(b"access_token")
         auth_headers = request.requestHeaders.getRawHeaders(b"Authorization")
         return bool(query_params) or bool(auth_headers)
 
     @staticmethod
-    def get_access_token_from_request(request: Request):
+    def get_access_token_from_request(request: Request) -> str:
         """Extracts the access_token from the request.
 
         Args:
             request: The http request.
         Returns:
-            unicode: The access_token
+            The access_token
         Raises:
             MissingClientTokenError: If there isn't a single access_token in the
                 request
         """
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
 
         auth_headers = request.requestHeaders.getRawHeaders(b"Authorization")
         query_params = request.args.get(b"access_token")
@@ -713,5 +798,13 @@ class Auth:
                 % (user_id, room_id),
             )
 
-    def check_auth_blocking(self, *args, **kwargs):
-        return self._auth_blocking.check_auth_blocking(*args, **kwargs)
+    async def check_auth_blocking(
+        self,
+        user_id: Optional[str] = None,
+        threepid: Optional[dict] = None,
+        user_type: Optional[str] = None,
+        requester: Optional[Requester] = None,
+    ) -> None:
+        await self._auth_blocking.check_auth_blocking(
+            user_id=user_id, threepid=threepid, user_type=user_type, requester=requester
+        )

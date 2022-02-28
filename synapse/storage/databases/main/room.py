@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
@@ -14,29 +13,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import collections
 import logging
 from abc import abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
-from synapse.api.constants import EventTypes
+import attr
+
+from synapse.api.constants import EventContentFields, EventTypes, JoinRules
 from synapse.api.errors import StoreError
 from synapse.api.room_versions import RoomVersion, RoomVersions
+from synapse.events import EventBase
 from synapse.storage._base import SQLBaseStore, db_to_json
-from synapse.storage.database import DatabasePool, LoggingTransaction
-from synapse.storage.databases.main.search import SearchStore
+from synapse.storage.database import (
+    DatabasePool,
+    LoggingDatabaseConnection,
+    LoggingTransaction,
+)
+from synapse.storage.databases.main.cache import CacheInvalidationWorkerStore
+from synapse.storage.types import Cursor
+from synapse.storage.util.id_generators import IdGenerator
 from synapse.types import JsonDict, ThirdPartyInstanceID
 from synapse.util import json_encoder
 from synapse.util.caches.descriptors import cached
 from synapse.util.stringutils import MXC_REGEX
 
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
+
 logger = logging.getLogger(__name__)
 
 
-RatelimitOverride = collections.namedtuple(
-    "RatelimitOverride", ("messages_per_second", "burst_count")
-)
+@attr.s(slots=True, frozen=True, auto_attribs=True)
+class RatelimitOverride:
+    messages_per_second: int
+    burst_count: int
 
 
 class RoomSortOrder(Enum):
@@ -67,13 +88,52 @@ class RoomSortOrder(Enum):
     STATE_EVENTS = "state_events"
 
 
-class RoomWorkerStore(SQLBaseStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+class RoomWorkerStore(CacheInvalidationWorkerStore):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
 
         self.config = hs.config
 
-    async def get_room(self, room_id: str) -> dict:
+    async def store_room(
+        self,
+        room_id: str,
+        room_creator_user_id: str,
+        is_public: bool,
+        room_version: RoomVersion,
+    ) -> None:
+        """Stores a room.
+
+        Args:
+            room_id: The desired room ID, can be None.
+            room_creator_user_id: The user ID of the room creator.
+            is_public: True to indicate that this room should appear in
+                public room lists.
+            room_version: The version of the room
+        Raises:
+            StoreError if the room could not be stored.
+        """
+        try:
+            await self.db_pool.simple_insert(
+                "rooms",
+                {
+                    "room_id": room_id,
+                    "creator": room_creator_user_id,
+                    "is_public": is_public,
+                    "room_version": room_version.identifier,
+                    "has_auth_chain_index": True,
+                },
+                desc="store_room",
+            )
+        except Exception as e:
+            logger.error("store_room with room_id=%s failed: %s", room_id, e)
+            raise StoreError(500, "Problem creating room.")
+
+    async def get_room(self, room_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a room.
 
         Args:
@@ -98,7 +158,9 @@ class RoomWorkerStore(SQLBaseStore):
             A dict containing the room information, or None if the room is unknown.
         """
 
-        def get_room_with_stats_txn(txn, room_id):
+        def get_room_with_stats_txn(
+            txn: LoggingTransaction, room_id: str
+        ) -> Optional[Dict[str, Any]]:
             sql = """
                 SELECT room_id, state.name, state.canonical_alias, curr.joined_members,
                   curr.local_users_in_room AS joined_local_members, rooms.room_version AS version,
@@ -147,7 +209,7 @@ class RoomWorkerStore(SQLBaseStore):
             ignore_non_federatable: If true filters out non-federatable rooms
         """
 
-        def _count_public_rooms_txn(txn):
+        def _count_public_rooms_txn(txn: LoggingTransaction) -> int:
             query_args = []
 
             if network_tuple:
@@ -157,6 +219,7 @@ class RoomWorkerStore(SQLBaseStore):
                         WHERE appservice_id = ? AND network_id = ?
                     """
                     query_args.append(network_tuple.appservice_id)
+                    assert network_tuple.network_id is not None
                     query_args.append(network_tuple.network_id)
                 else:
                     published_sql = """
@@ -170,7 +233,7 @@ class RoomWorkerStore(SQLBaseStore):
 
             sql = """
                 SELECT
-                    COALESCE(COUNT(*), 0)
+                    COUNT(*)
                 FROM (
                     %(published_sql)s
                 ) published
@@ -178,15 +241,17 @@ class RoomWorkerStore(SQLBaseStore):
                 INNER JOIN room_stats_current USING (room_id)
                 WHERE
                     (
-                        join_rules = 'public' OR history_visibility = 'world_readable'
+                        join_rules = 'public' OR join_rules = '%(knock_join_rule)s'
+                        OR history_visibility = 'world_readable'
                     )
                     AND joined_members > 0
             """ % {
-                "published_sql": published_sql
+                "published_sql": published_sql,
+                "knock_join_rule": JoinRules.KNOCK,
             }
 
             txn.execute(sql, query_args)
-            return txn.fetchone()[0]
+            return cast(Tuple[int], txn.fetchone())[0]
 
         return await self.db_pool.runInteraction(
             "count_public_rooms", _count_public_rooms_txn
@@ -195,11 +260,11 @@ class RoomWorkerStore(SQLBaseStore):
     async def get_room_count(self) -> int:
         """Retrieve the total number of rooms."""
 
-        def f(txn):
+        def f(txn: LoggingTransaction) -> int:
             sql = "SELECT count(*)  FROM rooms"
             txn.execute(sql)
-            row = txn.fetchone()
-            return row[0] or 0
+            row = cast(Tuple[int], txn.fetchone())
+            return row[0]
 
         return await self.db_pool.runInteraction("get_rooms", f)
 
@@ -211,7 +276,7 @@ class RoomWorkerStore(SQLBaseStore):
         bounds: Optional[Tuple[int, str]],
         forwards: bool,
         ignore_non_federatable: bool = False,
-    ):
+    ) -> List[Dict[str, Any]]:
         """Gets the largest public rooms (where largest is in terms of joined
         members, as tracked in the statistics table).
 
@@ -232,7 +297,7 @@ class RoomWorkerStore(SQLBaseStore):
         """
 
         where_clauses = []
-        query_args = []
+        query_args: List[Union[str, int]] = []
 
         if network_tuple:
             if network_tuple.appservice_id:
@@ -241,6 +306,7 @@ class RoomWorkerStore(SQLBaseStore):
                     WHERE appservice_id = ? AND network_id = ?
                 """
                 query_args.append(network_tuple.appservice_id)
+                assert network_tuple.network_id is not None
                 query_args.append(network_tuple.network_id)
             else:
                 published_sql = """
@@ -304,7 +370,7 @@ class RoomWorkerStore(SQLBaseStore):
         sql = """
             SELECT
                 room_id, name, topic, canonical_alias, joined_members,
-                avatar, history_visibility, joined_members, guest_access
+                avatar, history_visibility, guest_access, join_rules
             FROM (
                 %(published_sql)s
             ) published
@@ -312,7 +378,8 @@ class RoomWorkerStore(SQLBaseStore):
             INNER JOIN room_stats_current USING (room_id)
             WHERE
                 (
-                    join_rules = 'public' OR history_visibility = 'world_readable'
+                    join_rules = 'public' OR join_rules = '%(knock_join_rule)s'
+                    OR history_visibility = 'world_readable'
                 )
                 AND joined_members > 0
                 %(where_clause)s
@@ -321,6 +388,7 @@ class RoomWorkerStore(SQLBaseStore):
             "published_sql": published_sql,
             "where_clause": where_clause,
             "dir": "DESC" if forwards else "ASC",
+            "knock_join_rule": JoinRules.KNOCK,
         }
 
         if limit is not None:
@@ -330,7 +398,9 @@ class RoomWorkerStore(SQLBaseStore):
                 LIMIT ?
             """
 
-        def _get_largest_public_rooms_txn(txn):
+        def _get_largest_public_rooms_txn(
+            txn: LoggingTransaction,
+        ) -> List[Dict[str, Any]]:
             txn.execute(sql, query_args)
 
             results = self.db_pool.cursor_to_dict(txn)
@@ -355,11 +425,25 @@ class RoomWorkerStore(SQLBaseStore):
             desc="is_room_blocked",
         )
 
+    async def room_is_blocked_by(self, room_id: str) -> Optional[str]:
+        """
+        Function to retrieve user who has blocked the room.
+        user_id is non-nullable
+        It returns None if the room is not blocked.
+        """
+        return await self.db_pool.simple_select_one_onecol(
+            table="blocked_rooms",
+            keyvalues={"room_id": room_id},
+            retcol="user_id",
+            allow_none=True,
+            desc="room_is_blocked_by",
+        )
+
     async def get_rooms_paginate(
         self,
         start: int,
         limit: int,
-        order_by: RoomSortOrder,
+        order_by: str,
         reverse_order: bool,
         search_term: Optional[str],
     ) -> Tuple[List[Dict[str, Any]], int]:
@@ -370,22 +454,33 @@ class RoomWorkerStore(SQLBaseStore):
             limit: maximum amount of rooms to retrieve
             order_by: the sort order of the returned list
             reverse_order: whether to reverse the room list
-            search_term: a string to filter room names by
+            search_term: a string to filter room names,
+                canonical alias and room ids by.
+                Room ID must match exactly. Canonical alias must match a substring of the local part.
         Returns:
             A list of room dicts and an integer representing the total number of
             rooms that exist given this query
         """
         # Filter room names by a string
         where_statement = ""
+        search_pattern: List[object] = []
         if search_term:
-            where_statement = "WHERE LOWER(state.name) LIKE ?"
+            where_statement = """
+                WHERE LOWER(state.name) LIKE ?
+                OR LOWER(state.canonical_alias) LIKE ?
+                OR state.room_id = ?
+            """
 
             # Our postgres db driver converts ? -> %s in SQL strings as that's the
             # placeholder for postgres.
             # HOWEVER, if you put a % into your SQL then everything goes wibbly.
             # To get around this, we're going to surround search_term with %'s
             # before giving it to the database in python instead
-            search_term = "%" + search_term.lower() + "%"
+            search_pattern = [
+                "%" + search_term.lower() + "%",
+                "#%" + search_term.lower() + "%:%",
+                search_term,
+            ]
 
         # Set ordering
         if RoomSortOrder(order_by) == RoomSortOrder.SIZE:
@@ -476,13 +571,12 @@ class RoomWorkerStore(SQLBaseStore):
             where_statement,
         )
 
-        def _get_rooms_paginate_txn(txn):
-            # Execute the data query
-            sql_values = (limit, start)
-            if search_term:
-                # Add the search term into the WHERE clause
-                sql_values = (search_term,) + sql_values
-            txn.execute(info_sql, sql_values)
+        def _get_rooms_paginate_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[List[Dict[str, Any]], int]:
+            # Add the search term into the WHERE clause
+            # and execute the data query
+            txn.execute(info_sql, search_pattern + [limit, start])
 
             # Refactor room query data into a structured dictionary
             rooms = []
@@ -509,10 +603,9 @@ class RoomWorkerStore(SQLBaseStore):
             # Execute the count query
 
             # Add the search term into the WHERE clause if present
-            sql_values = (search_term,) if search_term else ()
-            txn.execute(count_sql, sql_values)
+            txn.execute(count_sql, search_pattern)
 
-            room_count = txn.fetchone()
+            room_count = cast(Tuple[int], txn.fetchone())
             return rooms, room_count[0]
 
         return await self.db_pool.runInteraction(
@@ -521,13 +614,11 @@ class RoomWorkerStore(SQLBaseStore):
         )
 
     @cached(max_entries=10000)
-    async def get_ratelimit_for_user(self, user_id):
-        """Check if there are any overrides for ratelimiting for the given
-        user
+    async def get_ratelimit_for_user(self, user_id: str) -> Optional[RatelimitOverride]:
+        """Check if there are any overrides for ratelimiting for the given user
 
         Args:
-            user_id (str)
-
+            user_id: user ID of the user
         Returns:
             RatelimitOverride if there is an override, else None. If the contents
             of RatelimitOverride are None or 0 then ratelimitng has been
@@ -549,8 +640,64 @@ class RoomWorkerStore(SQLBaseStore):
         else:
             return None
 
+    async def set_ratelimit_for_user(
+        self, user_id: str, messages_per_second: int, burst_count: int
+    ) -> None:
+        """Sets whether a user is set an overridden ratelimit.
+        Args:
+            user_id: user ID of the user
+            messages_per_second: The number of actions that can be performed in a second.
+            burst_count: How many actions that can be performed before being limited.
+        """
+
+        def set_ratelimit_txn(txn: LoggingTransaction) -> None:
+            self.db_pool.simple_upsert_txn(
+                txn,
+                table="ratelimit_override",
+                keyvalues={"user_id": user_id},
+                values={
+                    "messages_per_second": messages_per_second,
+                    "burst_count": burst_count,
+                },
+            )
+
+            self._invalidate_cache_and_stream(
+                txn, self.get_ratelimit_for_user, (user_id,)
+            )
+
+        await self.db_pool.runInteraction("set_ratelimit", set_ratelimit_txn)
+
+    async def delete_ratelimit_for_user(self, user_id: str) -> None:
+        """Delete an overridden ratelimit for a user.
+        Args:
+            user_id: user ID of the user
+        """
+
+        def delete_ratelimit_txn(txn: LoggingTransaction) -> None:
+            row = self.db_pool.simple_select_one_txn(
+                txn,
+                table="ratelimit_override",
+                keyvalues={"user_id": user_id},
+                retcols=["user_id"],
+                allow_none=True,
+            )
+
+            if not row:
+                return
+
+            # They are there, delete them.
+            self.db_pool.simple_delete_one_txn(
+                txn, "ratelimit_override", keyvalues={"user_id": user_id}
+            )
+
+            self._invalidate_cache_and_stream(
+                txn, self.get_ratelimit_for_user, (user_id,)
+            )
+
+        await self.db_pool.runInteraction("delete_ratelimit", delete_ratelimit_txn)
+
     @cached()
-    async def get_retention_policy_for_room(self, room_id):
+    async def get_retention_policy_for_room(self, room_id: str) -> Dict[str, int]:
         """Get the retention policy for a given room.
 
         If no retention policy has been found for this room, returns a policy defined
@@ -559,13 +706,15 @@ class RoomWorkerStore(SQLBaseStore):
         configuration).
 
         Args:
-            room_id (str): The ID of the room to get the retention policy of.
+            room_id: The ID of the room to get the retention policy of.
 
         Returns:
-            dict[int, int]: "min_lifetime" and "max_lifetime" for this room.
+            A dict containing "min_lifetime" and "max_lifetime" for this room.
         """
 
-        def get_retention_policy_for_room_txn(txn):
+        def get_retention_policy_for_room_txn(
+            txn: LoggingTransaction,
+        ) -> List[Dict[str, Optional[int]]]:
             txn.execute(
                 """
                 SELECT min_lifetime, max_lifetime FROM room_retention
@@ -586,23 +735,27 @@ class RoomWorkerStore(SQLBaseStore):
         # policy.
         if not ret:
             return {
-                "min_lifetime": self.config.retention_default_min_lifetime,
-                "max_lifetime": self.config.retention_default_max_lifetime,
+                "min_lifetime": self.config.retention.retention_default_min_lifetime,
+                "max_lifetime": self.config.retention.retention_default_max_lifetime,
             }
 
-        row = ret[0]
+        min_lifetime = ret[0]["min_lifetime"]
+        max_lifetime = ret[0]["max_lifetime"]
 
         # If one of the room's policy's attributes isn't defined, use the matching
         # attribute from the default policy.
         # The default values will be None if no default policy has been defined, or if one
         # of the attributes is missing from the default policy.
-        if row["min_lifetime"] is None:
-            row["min_lifetime"] = self.config.retention_default_min_lifetime
+        if min_lifetime is None:
+            min_lifetime = self.config.retention.retention_default_min_lifetime
 
-        if row["max_lifetime"] is None:
-            row["max_lifetime"] = self.config.retention_default_max_lifetime
+        if max_lifetime is None:
+            max_lifetime = self.config.retention.retention_default_max_lifetime
 
-        return row
+        return {
+            "min_lifetime": min_lifetime,
+            "max_lifetime": max_lifetime,
+        }
 
     async def get_media_mxcs_in_room(self, room_id: str) -> Tuple[List[str], List[str]]:
         """Retrieves all the local and remote media MXC URIs in a given room
@@ -614,7 +767,9 @@ class RoomWorkerStore(SQLBaseStore):
             The local and remote media as a lists of the media IDs.
         """
 
-        def _get_media_mxcs_in_room_txn(txn):
+        def _get_media_mxcs_in_room_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[List[str], List[str]]:
             local_mxcs, remote_mxcs = self._get_media_mxcs_in_room_txn(txn, room_id)
             local_media_mxcs = []
             remote_media_mxcs = []
@@ -640,7 +795,7 @@ class RoomWorkerStore(SQLBaseStore):
 
         logger.info("Quarantining media in room: %s", room_id)
 
-        def _quarantine_media_in_room_txn(txn):
+        def _quarantine_media_in_room_txn(txn: LoggingTransaction) -> int:
             local_mxcs, remote_mxcs = self._get_media_mxcs_in_room_txn(txn, room_id)
             return self._quarantine_media_txn(
                 txn, local_mxcs, remote_mxcs, quarantined_by
@@ -650,12 +805,10 @@ class RoomWorkerStore(SQLBaseStore):
             "quarantine_media_in_room", _quarantine_media_in_room_txn
         )
 
-    def _get_media_mxcs_in_room_txn(self, txn, room_id):
+    def _get_media_mxcs_in_room_txn(
+        self, txn: LoggingTransaction, room_id: str
+    ) -> Tuple[List[str], List[Tuple[str, str]]]:
         """Retrieves all the local and remote media MXC URIs in a given room
-
-        Args:
-            txn (cursor)
-            room_id (str)
 
         Returns:
             The local and remote media as a lists of tuples where the key is
@@ -711,19 +864,20 @@ class RoomWorkerStore(SQLBaseStore):
         self,
         server_name: str,
         media_id: str,
-        quarantined_by: str,
+        quarantined_by: Optional[str],
     ) -> int:
-        """quarantines a single local or remote media id
+        """quarantines or unquarantines a single local or remote media id
 
         Args:
             server_name: The name of the server that holds this media
             media_id: The ID of the media to be quarantined
             quarantined_by: The user ID that initiated the quarantine request
+                If it is `None` media will be removed from quarantine
         """
         logger.info("Quarantining media: %s/%s", server_name, media_id)
-        is_local = server_name == self.config.server_name
+        is_local = server_name == self.config.server.server_name
 
-        def _quarantine_media_by_id_txn(txn):
+        def _quarantine_media_by_id_txn(txn: LoggingTransaction) -> int:
             local_mxcs = [media_id] if is_local else []
             remote_mxcs = [(server_name, media_id)] if not is_local else []
 
@@ -745,7 +899,7 @@ class RoomWorkerStore(SQLBaseStore):
             quarantined_by: The ID of the user who made the quarantine request
         """
 
-        def _quarantine_media_by_user_txn(txn):
+        def _quarantine_media_by_user_txn(txn: LoggingTransaction) -> int:
             local_media_ids = self._get_media_ids_by_user_txn(txn, user_id)
             return self._quarantine_media_txn(txn, local_media_ids, [], quarantined_by)
 
@@ -753,7 +907,9 @@ class RoomWorkerStore(SQLBaseStore):
             "quarantine_media_by_user", _quarantine_media_by_user_txn
         )
 
-    def _get_media_ids_by_user_txn(self, txn, user_id: str, filter_quarantined=True):
+    def _get_media_ids_by_user_txn(
+        self, txn: LoggingTransaction, user_id: str, filter_quarantined: bool = True
+    ) -> List[str]:
         """Retrieves local media IDs by a given user
 
         Args:
@@ -782,12 +938,12 @@ class RoomWorkerStore(SQLBaseStore):
 
     def _quarantine_media_txn(
         self,
-        txn,
+        txn: LoggingTransaction,
         local_mxcs: List[str],
         remote_mxcs: List[Tuple[str, str]],
-        quarantined_by: str,
+        quarantined_by: Optional[str],
     ) -> int:
-        """Quarantine local and remote media items
+        """Quarantine and unquarantine local and remote media items
 
         Args:
             txn (cursor)
@@ -795,18 +951,30 @@ class RoomWorkerStore(SQLBaseStore):
             remote_mxcs: A list of (remote server, media id) tuples representing
                 remote mxc URLs
             quarantined_by: The ID of the user who initiated the quarantine request
+                If it is `None` media will be removed from quarantine
         Returns:
             The total number of media items quarantined
         """
+
         # Update all the tables to set the quarantined_by flag
-        txn.executemany(
-            """
+        sql = """
             UPDATE local_media_repository
             SET quarantined_by = ?
-            WHERE media_id = ? AND safe_from_quarantine = ?
-        """,
-            ((quarantined_by, media_id, False) for media_id in local_mxcs),
-        )
+            WHERE media_id = ?
+        """
+
+        # set quarantine
+        if quarantined_by is not None:
+            sql += "AND safe_from_quarantine = ?"
+            txn.executemany(
+                sql, [(quarantined_by, media_id, False) for media_id in local_mxcs]
+            )
+        # remove from quarantine
+        else:
+            txn.executemany(
+                sql, [(quarantined_by, media_id) for media_id in local_mxcs]
+            )
+
         # Note that a rowcount of -1 can be used to indicate no rows were affected.
         total_media_quarantined = txn.rowcount if txn.rowcount > 0 else 0
 
@@ -822,58 +990,9 @@ class RoomWorkerStore(SQLBaseStore):
 
         return total_media_quarantined
 
-    async def get_all_new_public_rooms(
-        self, instance_name: str, last_id: int, current_id: int, limit: int
-    ) -> Tuple[List[Tuple[int, tuple]], int, bool]:
-        """Get updates for public rooms replication stream.
-
-        Args:
-            instance_name: The writer we want to fetch updates from. Unused
-                here since there is only ever one writer.
-            last_id: The token to fetch updates from. Exclusive.
-            current_id: The token to fetch updates up to. Inclusive.
-            limit: The requested limit for the number of rows to return. The
-                function may return more or fewer rows.
-
-        Returns:
-            A tuple consisting of: the updates, a token to use to fetch
-            subsequent updates, and whether we returned fewer rows than exists
-            between the requested tokens due to the limit.
-
-            The token returned can be used in a subsequent call to this
-            function to get further updatees.
-
-            The updates are a list of 2-tuples of stream ID and the row data
-        """
-        if last_id == current_id:
-            return [], current_id, False
-
-        def get_all_new_public_rooms(txn):
-            sql = """
-                SELECT stream_id, room_id, visibility, appservice_id, network_id
-                FROM public_room_list_stream
-                WHERE stream_id > ? AND stream_id <= ?
-                ORDER BY stream_id ASC
-                LIMIT ?
-            """
-
-            txn.execute(sql, (last_id, current_id, limit))
-            updates = [(row[0], row[1:]) for row in txn]
-            limited = False
-            upto_token = current_id
-            if len(updates) >= limit:
-                upto_token = updates[-1][0]
-                limited = True
-
-            return updates, upto_token, limited
-
-        return await self.db_pool.runInteraction(
-            "get_all_new_public_rooms", get_all_new_public_rooms
-        )
-
     async def get_rooms_for_retention_period_in_range(
         self, min_ms: Optional[int], max_ms: Optional[int], include_null: bool = False
-    ) -> Dict[str, dict]:
+    ) -> Dict[str, Dict[str, Optional[int]]]:
         """Retrieves all of the rooms within the given retention range.
 
         Optionally includes the rooms which don't have a retention policy.
@@ -893,7 +1012,9 @@ class RoomWorkerStore(SQLBaseStore):
             "min_lifetime" (int|None), and "max_lifetime" (int|None).
         """
 
-        def get_rooms_for_retention_period_in_range_txn(txn):
+        def get_rooms_for_retention_period_in_range_txn(
+            txn: LoggingTransaction,
+        ) -> Dict[str, Dict[str, Optional[int]]]:
             range_conditions = []
             args = []
 
@@ -955,14 +1076,30 @@ class RoomWorkerStore(SQLBaseStore):
         )
 
 
-class RoomBackgroundUpdateStore(SQLBaseStore):
+class _BackgroundUpdates:
     REMOVE_TOMESTONED_ROOMS_BG_UPDATE = "remove_tombstoned_rooms_from_directory"
     ADD_ROOMS_ROOM_VERSION_COLUMN = "add_rooms_room_version_column"
+    POPULATE_ROOM_DEPTH_MIN_DEPTH2 = "populate_room_depth_min_depth2"
+    REPLACE_ROOM_DEPTH_MIN_DEPTH = "replace_room_depth_min_depth"
+    POPULATE_ROOMS_CREATOR_COLUMN = "populate_rooms_creator_column"
 
-    def __init__(self, database: DatabasePool, db_conn, hs):
+
+_REPLACE_ROOM_DEPTH_SQL_COMMANDS = (
+    "DROP TRIGGER populate_min_depth2_trigger ON room_depth",
+    "DROP FUNCTION populate_min_depth2()",
+    "ALTER TABLE room_depth DROP COLUMN min_depth",
+    "ALTER TABLE room_depth RENAME COLUMN min_depth2 TO min_depth",
+)
+
+
+class RoomBackgroundUpdateStore(SQLBaseStore):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
-
-        self.config = hs.config
 
         self.db_pool.updates.register_background_update_handler(
             "insert_room_retention",
@@ -970,16 +1107,33 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
         )
 
         self.db_pool.updates.register_background_update_handler(
-            self.REMOVE_TOMESTONED_ROOMS_BG_UPDATE,
+            _BackgroundUpdates.REMOVE_TOMESTONED_ROOMS_BG_UPDATE,
             self._remove_tombstoned_rooms_from_directory,
         )
 
         self.db_pool.updates.register_background_update_handler(
-            self.ADD_ROOMS_ROOM_VERSION_COLUMN,
+            _BackgroundUpdates.ADD_ROOMS_ROOM_VERSION_COLUMN,
             self._background_add_rooms_room_version_column,
         )
 
-    async def _background_insert_retention(self, progress, batch_size):
+        # BG updates to change the type of room_depth.min_depth
+        self.db_pool.updates.register_background_update_handler(
+            _BackgroundUpdates.POPULATE_ROOM_DEPTH_MIN_DEPTH2,
+            self._background_populate_room_depth_min_depth2,
+        )
+        self.db_pool.updates.register_background_update_handler(
+            _BackgroundUpdates.REPLACE_ROOM_DEPTH_MIN_DEPTH,
+            self._background_replace_room_depth_min_depth,
+        )
+
+        self.db_pool.updates.register_background_update_handler(
+            _BackgroundUpdates.POPULATE_ROOMS_CREATOR_COLUMN,
+            self._background_populate_rooms_creator_column,
+        )
+
+    async def _background_insert_retention(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
         """Retrieves a list of all rooms within a range and inserts an entry for each of
         them into the room_retention table.
         NULLs the property's columns if missing from the retention event in the room's
@@ -989,7 +1143,7 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
 
         last_room = progress.get("room_id", "")
 
-        def _background_insert_retention_txn(txn):
+        def _background_insert_retention_txn(txn: LoggingTransaction) -> bool:
             txn.execute(
                 """
                 SELECT state.room_id, state.event_id, events.json
@@ -1048,15 +1202,17 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
         return batch_size
 
     async def _background_add_rooms_room_version_column(
-        self, progress: dict, batch_size: int
-    ):
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
         """Background update to go and add room version information to `rooms`
         table from `current_state_events` table.
         """
 
         last_room_id = progress.get("room_id", "")
 
-        def _background_add_rooms_room_version_column_txn(txn: LoggingTransaction):
+        def _background_add_rooms_room_version_column_txn(
+            txn: LoggingTransaction,
+        ) -> bool:
             sql = """
                 SELECT room_id, json FROM current_state_events
                 INNER JOIN event_json USING (room_id, event_id)
@@ -1097,7 +1253,9 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
                 new_last_room_id = room_id
 
             self.db_pool.updates._background_update_progress_txn(
-                txn, self.ADD_ROOMS_ROOM_VERSION_COLUMN, {"room_id": new_last_room_id}
+                txn,
+                _BackgroundUpdates.ADD_ROOMS_ROOM_VERSION_COLUMN,
+                {"room_id": new_last_room_id},
             )
 
             return False
@@ -1109,13 +1267,13 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
 
         if end:
             await self.db_pool.updates._end_background_update(
-                self.ADD_ROOMS_ROOM_VERSION_COLUMN
+                _BackgroundUpdates.ADD_ROOMS_ROOM_VERSION_COLUMN
             )
 
         return batch_size
 
     async def _remove_tombstoned_rooms_from_directory(
-        self, progress, batch_size
+        self, progress: JsonDict, batch_size: int
     ) -> int:
         """Removes any rooms with tombstone events from the room directory
 
@@ -1125,7 +1283,7 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
 
         last_room = progress.get("room_id", "")
 
-        def _get_rooms(txn):
+        def _get_rooms(txn: LoggingTransaction) -> List[str]:
             txn.execute(
                 """
                 SELECT room_id
@@ -1148,7 +1306,7 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
 
         if not rooms:
             await self.db_pool.updates._end_background_update(
-                self.REMOVE_TOMESTONED_ROOMS_BG_UPDATE
+                _BackgroundUpdates.REMOVE_TOMESTONED_ROOMS_BG_UPDATE
             )
             return 0
 
@@ -1157,13 +1315,13 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
             await self.set_room_is_public(room_id, False)
 
         await self.db_pool.updates._background_update_progress(
-            self.REMOVE_TOMESTONED_ROOMS_BG_UPDATE, {"room_id": rooms[-1]}
+            _BackgroundUpdates.REMOVE_TOMESTONED_ROOMS_BG_UPDATE, {"room_id": rooms[-1]}
         )
 
         return len(rooms)
 
     @abstractmethod
-    def set_room_is_public(self, room_id, is_public):
+    def set_room_is_public(self, room_id: str, is_public: bool) -> Awaitable[None]:
         # this will need to be implemented if a background update is performed with
         # existing (tombstoned, public) rooms in the database.
         #
@@ -1196,19 +1354,152 @@ class RoomBackgroundUpdateStore(SQLBaseStore):
             keyvalues={"room_id": room_id},
             retcol="MAX(stream_ordering)",
             allow_none=True,
-            desc="upsert_room_on_join",
+            desc="has_auth_chain_index_fallback",
         )
 
         return max_ordering is None
 
+    async def _background_populate_room_depth_min_depth2(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
+        """Populate room_depth.min_depth2
 
-class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+        This is to deal with the fact that min_depth was initially created as a
+        32-bit integer field.
+        """
+
+        def process(txn: LoggingTransaction) -> int:
+            last_room = progress.get("last_room", "")
+            txn.execute(
+                """
+                UPDATE room_depth SET min_depth2=min_depth
+                WHERE room_id IN (
+                   SELECT room_id FROM room_depth WHERE room_id > ?
+                   ORDER BY room_id LIMIT ?
+                )
+                RETURNING room_id;
+                """,
+                (last_room, batch_size),
+            )
+            row_count = txn.rowcount
+            if row_count == 0:
+                return 0
+            last_room = max(row[0] for row in txn)
+            logger.info("populated room_depth up to %s", last_room)
+
+            self.db_pool.updates._background_update_progress_txn(
+                txn,
+                _BackgroundUpdates.POPULATE_ROOM_DEPTH_MIN_DEPTH2,
+                {"last_room": last_room},
+            )
+            return row_count
+
+        result = await self.db_pool.runInteraction(
+            "_background_populate_min_depth2", process
+        )
+
+        if result != 0:
+            return result
+
+        await self.db_pool.updates._end_background_update(
+            _BackgroundUpdates.POPULATE_ROOM_DEPTH_MIN_DEPTH2
+        )
+        return 0
+
+    async def _background_replace_room_depth_min_depth(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
+        """Drop the old 'min_depth' column and rename 'min_depth2' into its place."""
+
+        def process(txn: Cursor) -> None:
+            for sql in _REPLACE_ROOM_DEPTH_SQL_COMMANDS:
+                logger.info("completing room_depth migration: %s", sql)
+                txn.execute(sql)
+
+        await self.db_pool.runInteraction("_background_replace_room_depth", process)
+
+        await self.db_pool.updates._end_background_update(
+            _BackgroundUpdates.REPLACE_ROOM_DEPTH_MIN_DEPTH,
+        )
+
+        return 0
+
+    async def _background_populate_rooms_creator_column(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
+        """Background update to go and add creator information to `rooms`
+        table from `current_state_events` table.
+        """
+
+        last_room_id = progress.get("room_id", "")
+
+        def _background_populate_rooms_creator_column_txn(
+            txn: LoggingTransaction,
+        ) -> bool:
+            sql = """
+                SELECT room_id, json FROM event_json
+                INNER JOIN rooms AS room USING (room_id)
+                INNER JOIN current_state_events AS state_event USING (room_id, event_id)
+                WHERE room_id > ? AND (room.creator IS NULL OR room.creator = '') AND state_event.type = 'm.room.create' AND state_event.state_key = ''
+                ORDER BY room_id
+                LIMIT ?
+            """
+
+            txn.execute(sql, (last_room_id, batch_size))
+            room_id_to_create_event_results = txn.fetchall()
+
+            new_last_room_id = ""
+            for room_id, event_json in room_id_to_create_event_results:
+                event_dict = db_to_json(event_json)
+
+                creator = event_dict.get("content").get(EventContentFields.ROOM_CREATOR)
+
+                self.db_pool.simple_update_txn(
+                    txn,
+                    table="rooms",
+                    keyvalues={"room_id": room_id},
+                    updatevalues={"creator": creator},
+                )
+                new_last_room_id = room_id
+
+            if new_last_room_id == "":
+                return True
+
+            self.db_pool.updates._background_update_progress_txn(
+                txn,
+                _BackgroundUpdates.POPULATE_ROOMS_CREATOR_COLUMN,
+                {"room_id": new_last_room_id},
+            )
+
+            return False
+
+        end = await self.db_pool.runInteraction(
+            "_background_populate_rooms_creator_column",
+            _background_populate_rooms_creator_column_txn,
+        )
+
+        if end:
+            await self.db_pool.updates._end_background_update(
+                _BackgroundUpdates.POPULATE_ROOMS_CREATOR_COLUMN
+            )
+
+        return batch_size
+
+
+class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore):
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
         super().__init__(database, db_conn, hs)
 
-        self.config = hs.config
+        self._event_reports_id_gen = IdGenerator(db_conn, "event_reports", "id")
 
-    async def upsert_room_on_join(self, room_id: str, room_version: RoomVersion):
+    async def upsert_room_on_join(
+        self, room_id: str, room_version: RoomVersion, auth_events: List[EventBase]
+    ) -> None:
         """Ensure that the room is stored in the table
 
         Called when we join a room over federation, and overwrites any room version
@@ -1219,6 +1510,24 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
         # mark the room as having an auth chain cover index.
         has_auth_chain_index = await self.has_auth_chain_index(room_id)
 
+        create_event = None
+        for e in auth_events:
+            if (e.type, e.state_key) == (EventTypes.Create, ""):
+                create_event = e
+                break
+
+        if create_event is None:
+            # If the state doesn't have a create event then the room is
+            # invalid, and it would fail auth checks anyway.
+            raise StoreError(400, "No create event in state")
+
+        room_creator = create_event.content.get(EventContentFields.ROOM_CREATOR)
+
+        if not isinstance(room_creator, str):
+            # If the create event does not have a creator then the room is
+            # invalid, and it would fail auth checks anyway.
+            raise StoreError(400, "No creator defined on the create event")
+
         await self.db_pool.simple_upsert(
             desc="upsert_room_on_join",
             table="rooms",
@@ -1226,7 +1535,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             values={"room_version": room_version.identifier},
             insertion_values={
                 "is_public": False,
-                "creator": "",
+                "creator": room_creator,
                 "has_auth_chain_index": has_auth_chain_index,
             },
             # rooms has a unique constraint on room_id, so no need to lock when doing an
@@ -1234,60 +1543,9 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             lock=False,
         )
 
-    async def store_room(
-        self,
-        room_id: str,
-        room_creator_user_id: str,
-        is_public: bool,
-        room_version: RoomVersion,
-    ):
-        """Stores a room.
-
-        Args:
-            room_id: The desired room ID, can be None.
-            room_creator_user_id: The user ID of the room creator.
-            is_public: True to indicate that this room should appear in
-                public room lists.
-            room_version: The version of the room
-        Raises:
-            StoreError if the room could not be stored.
-        """
-        try:
-
-            def store_room_txn(txn, next_id):
-                self.db_pool.simple_insert_txn(
-                    txn,
-                    "rooms",
-                    {
-                        "room_id": room_id,
-                        "creator": room_creator_user_id,
-                        "is_public": is_public,
-                        "room_version": room_version.identifier,
-                        "has_auth_chain_index": True,
-                    },
-                )
-                if is_public:
-                    self.db_pool.simple_insert_txn(
-                        txn,
-                        table="public_room_list_stream",
-                        values={
-                            "stream_id": next_id,
-                            "room_id": room_id,
-                            "visibility": is_public,
-                        },
-                    )
-
-            async with self._public_room_id_gen.get_next() as next_id:
-                await self.db_pool.runInteraction(
-                    "store_room_txn", store_room_txn, next_id
-                )
-        except Exception as e:
-            logger.error("store_room with room_id=%s failed: %s", room_id, e)
-            raise StoreError(500, "Problem creating room.")
-
     async def maybe_store_room_on_outlier_membership(
         self, room_id: str, room_version: RoomVersion
-    ):
+    ) -> None:
         """
         When we receive an invite or any other event over federation that may relate to a room
         we are not in, store the version of the room if we don't already know the room version.
@@ -1305,6 +1563,9 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             insertion_values={
                 "room_version": room_version.identifier,
                 "is_public": False,
+                # We don't worry about setting the `creator` here because
+                # we don't process any messages in a room while a user is
+                # invited (only after the join).
                 "creator": "",
                 "has_auth_chain_index": has_auth_chain_index,
             },
@@ -1313,54 +1574,19 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             lock=False,
         )
 
-    async def set_room_is_public(self, room_id, is_public):
-        def set_room_is_public_txn(txn, next_id):
-            self.db_pool.simple_update_one_txn(
-                txn,
-                table="rooms",
-                keyvalues={"room_id": room_id},
-                updatevalues={"is_public": is_public},
-            )
+    async def set_room_is_public(self, room_id: str, is_public: bool) -> None:
+        await self.db_pool.simple_update_one(
+            table="rooms",
+            keyvalues={"room_id": room_id},
+            updatevalues={"is_public": is_public},
+            desc="set_room_is_public",
+        )
 
-            entries = self.db_pool.simple_select_list_txn(
-                txn,
-                table="public_room_list_stream",
-                keyvalues={
-                    "room_id": room_id,
-                    "appservice_id": None,
-                    "network_id": None,
-                },
-                retcols=("stream_id", "visibility"),
-            )
-
-            entries.sort(key=lambda r: r["stream_id"])
-
-            add_to_stream = True
-            if entries:
-                add_to_stream = bool(entries[-1]["visibility"]) != is_public
-
-            if add_to_stream:
-                self.db_pool.simple_insert_txn(
-                    txn,
-                    table="public_room_list_stream",
-                    values={
-                        "stream_id": next_id,
-                        "room_id": room_id,
-                        "visibility": is_public,
-                        "appservice_id": None,
-                        "network_id": None,
-                    },
-                )
-
-        async with self._public_room_id_gen.get_next() as next_id:
-            await self.db_pool.runInteraction(
-                "set_room_is_public", set_room_is_public_txn, next_id
-            )
         self.hs.get_notifier().on_new_replication_data()
 
     async def set_room_is_public_appservice(
-        self, room_id, appservice_id, network_id, is_public
-    ):
+        self, room_id: str, appservice_id: str, network_id: str, is_public: bool
+    ) -> None:
         """Edit the appservice/network specific public room list.
 
         Each appservice can have a number of published room lists associated
@@ -1369,75 +1595,39 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
         network.
 
         Args:
-            room_id (str)
-            appservice_id (str)
-            network_id (str)
-            is_public (bool): Whether to publish or unpublish the room from the
-                list.
+            room_id
+            appservice_id
+            network_id
+            is_public: Whether to publish or unpublish the room from the list.
         """
 
-        def set_room_is_public_appservice_txn(txn, next_id):
-            if is_public:
-                try:
-                    self.db_pool.simple_insert_txn(
-                        txn,
-                        table="appservice_room_list",
-                        values={
-                            "appservice_id": appservice_id,
-                            "network_id": network_id,
-                            "room_id": room_id,
-                        },
-                    )
-                except self.database_engine.module.IntegrityError:
-                    # We've already inserted, nothing to do.
-                    return
-            else:
-                self.db_pool.simple_delete_txn(
-                    txn,
-                    table="appservice_room_list",
-                    keyvalues={
-                        "appservice_id": appservice_id,
-                        "network_id": network_id,
-                        "room_id": room_id,
-                    },
-                )
-
-            entries = self.db_pool.simple_select_list_txn(
-                txn,
-                table="public_room_list_stream",
+        if is_public:
+            await self.db_pool.simple_upsert(
+                table="appservice_room_list",
                 keyvalues={
-                    "room_id": room_id,
                     "appservice_id": appservice_id,
                     "network_id": network_id,
+                    "room_id": room_id,
                 },
-                retcols=("stream_id", "visibility"),
+                values={},
+                insertion_values={
+                    "appservice_id": appservice_id,
+                    "network_id": network_id,
+                    "room_id": room_id,
+                },
+                desc="set_room_is_public_appservice_true",
+            )
+        else:
+            await self.db_pool.simple_delete(
+                table="appservice_room_list",
+                keyvalues={
+                    "appservice_id": appservice_id,
+                    "network_id": network_id,
+                    "room_id": room_id,
+                },
+                desc="set_room_is_public_appservice_false",
             )
 
-            entries.sort(key=lambda r: r["stream_id"])
-
-            add_to_stream = True
-            if entries:
-                add_to_stream = bool(entries[-1]["visibility"]) != is_public
-
-            if add_to_stream:
-                self.db_pool.simple_insert_txn(
-                    txn,
-                    table="public_room_list_stream",
-                    values={
-                        "stream_id": next_id,
-                        "room_id": room_id,
-                        "visibility": is_public,
-                        "appservice_id": appservice_id,
-                        "network_id": network_id,
-                    },
-                )
-
-        async with self._public_room_id_gen.get_next() as next_id:
-            await self.db_pool.runInteraction(
-                "set_room_is_public_appservice",
-                set_room_is_public_appservice_txn,
-                next_id,
-            )
         self.hs.get_notifier().on_new_replication_data()
 
     async def add_event_report(
@@ -1445,7 +1635,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
         room_id: str,
         event_id: str,
         user_id: str,
-        reason: str,
+        reason: Optional[str],
         content: JsonDict,
         received_ts: int,
     ) -> None:
@@ -1473,7 +1663,9 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             event_report: json list of information from event report
         """
 
-        def _get_event_report_txn(txn, report_id):
+        def _get_event_report_txn(
+            txn: LoggingTransaction, report_id: int
+        ) -> Optional[Dict[str, Any]]:
 
             sql = """
                 SELECT
@@ -1545,9 +1737,11 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             count: total number of event reports matching the filter criteria
         """
 
-        def _get_event_reports_paginate_txn(txn):
+        def _get_event_reports_paginate_txn(
+            txn: LoggingTransaction,
+        ) -> Tuple[List[Dict[str, Any]], int]:
             filters = []
-            args = []
+            args: List[object] = []
 
             if user_id:
                 filters.append("er.user_id LIKE ?")
@@ -1571,7 +1765,7 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
                 where_clause
             )
             txn.execute(sql, args)
-            count = txn.fetchone()[0]
+            count = cast(Tuple[int], txn.fetchone())[0]
 
             sql = """
                 SELECT
@@ -1630,11 +1824,13 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             "get_event_reports_paginate", _get_event_reports_paginate_txn
         )
 
-    def get_current_public_room_stream_id(self):
-        return self._public_room_id_gen.get_current_token()
-
     async def block_room(self, room_id: str, user_id: str) -> None:
-        """Marks the room as blocked. Can be called multiple times.
+        """Marks the room as blocked.
+
+        Can be called multiple times (though we'll only track the last user to
+        block this room).
+
+        Can be called on a room unknown to this homeserver.
 
         Args:
             room_id: Room to block
@@ -1646,6 +1842,24 @@ class RoomStore(RoomBackgroundUpdateStore, RoomWorkerStore, SearchStore):
             values={},
             insertion_values={"user_id": user_id},
             desc="block_room",
+        )
+        await self.db_pool.runInteraction(
+            "block_room_invalidation",
+            self._invalidate_cache_and_stream,
+            self.is_room_blocked,
+            (room_id,),
+        )
+
+    async def unblock_room(self, room_id: str) -> None:
+        """Remove the room from blocking list.
+
+        Args:
+            room_id: Room to unblock
+        """
+        await self.db_pool.simple_delete(
+            table="blocked_rooms",
+            keyvalues={"room_id": room_id},
+            desc="unblock_room",
         )
         await self.db_pool.runInteraction(
             "block_room_invalidation",

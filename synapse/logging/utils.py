@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,6 +16,7 @@
 import logging
 from functools import wraps
 from inspect import getcallargs
+from typing import Callable, TypeVar, cast
 
 _TIME_FUNC_ID = 0
 
@@ -42,7 +42,10 @@ def _log_debug_as_f(f, msg, msg_args):
         logger.handle(record)
 
 
-def log_function(f):
+F = TypeVar("F", bound=Callable)
+
+
+def log_function(f: F) -> F:
     """Function decorator that logs every call to that function."""
     func_name = f.__name__
 
@@ -70,4 +73,4 @@ def log_function(f):
         return f(*args, **kwargs)
 
     wrapped.__name__ = func_name
-    return wrapped
+    return cast(F, wrapped)

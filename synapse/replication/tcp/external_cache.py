@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,12 +15,14 @@
 import logging
 from typing import TYPE_CHECKING, Any, Optional
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Histogram
 
 from synapse.logging.context import make_deferred_yieldable
 from synapse.util import json_decoder, json_encoder
 
 if TYPE_CHECKING:
+    from txredisapi import RedisProtocol
+
     from synapse.server import HomeServer
 
 set_counter = Counter(
@@ -36,6 +37,20 @@ get_counter = Counter(
     labelnames=["cache_name", "hit"],
 )
 
+response_timer = Histogram(
+    "synapse_external_cache_response_time_seconds",
+    "Time taken to get a response from Redis for a cache get/set request",
+    labelnames=["method"],
+    buckets=(
+        0.001,
+        0.002,
+        0.005,
+        0.01,
+        0.02,
+        0.05,
+    ),
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +61,12 @@ class ExternalCache:
     """
 
     def __init__(self, hs: "HomeServer"):
-        self._redis_connection = hs.get_outbound_redis_connection()
+        if hs.config.redis.redis_enabled:
+            self._redis_connection: Optional[
+                "RedisProtocol"
+            ] = hs.get_outbound_redis_connection()
+        else:
+            self._redis_connection = None
 
     def _get_redis_key(self, cache_name: str, key: str) -> str:
         return "cache_v1:%s:%s" % (cache_name, key)
@@ -73,13 +93,14 @@ class ExternalCache:
 
         logger.debug("Caching %s %s: %r", cache_name, key, encoded_value)
 
-        return await make_deferred_yieldable(
-            self._redis_connection.set(
-                self._get_redis_key(cache_name, key),
-                encoded_value,
-                pexpire=expiry_ms,
+        with response_timer.labels("set").time():
+            return await make_deferred_yieldable(
+                self._redis_connection.set(
+                    self._get_redis_key(cache_name, key),
+                    encoded_value,
+                    pexpire=expiry_ms,
+                )
             )
-        )
 
     async def get(self, cache_name: str, key: str) -> Optional[Any]:
         """Look up a key/value in the named cache."""
@@ -87,9 +108,10 @@ class ExternalCache:
         if self._redis_connection is None:
             return None
 
-        result = await make_deferred_yieldable(
-            self._redis_connection.get(self._get_redis_key(cache_name, key))
-        )
+        with response_timer.labels("get").time():
+            result = await make_deferred_yieldable(
+                self._redis_connection.get(self._get_redis_key(cache_name, key))
+            )
 
         logger.debug("Got cache result %s %s: %r", cache_name, key, result)
 
