@@ -61,7 +61,7 @@ class AmpMetricsStore(SQLBaseStore):
             sql = """
                 SELECT count(*)
                 FROM users
-                WHERE user_type = 'basic';
+                WHERE user_type = 'free';
             """
             txn.execute(sql)
             (count,) = txn.fetchone()
@@ -87,13 +87,11 @@ class AmpMetricsStore(SQLBaseStore):
     async def _count_amp_mau(self) -> int:
         def _count(txn):
             sql = """
-                SELECT count(*)
-                FROM (SELECT user_id FROM user_stats_historical
-                        WHERE TO_TIMESTAMP(end_ts/1000) AT TIME ZONE 'UTC' >
-                        date_trunc('day', now() - interval '1 month') GROUP BY user_id)
-                        AS u INNER JOIN (SELECT name AS user_id FROM users
-                        WHERE is_guest = 0 AND deactivated = 0 AND user_type IS NULL)
-                        AS v ON u.user_id = v.user_id)
+                SELECT COUNT(*)
+                FROM (SELECT name as user_id FROM users
+                        WHERE is_guest=0 AND user_type IS NULL) AS u INNER JOIN
+                        (SELECT user_id FROM monthly_active_users)
+                        AS v ON u.user_id=v.user_id
             """
             txn.execute(sql)
             (count,) = txn.fetchone()
@@ -106,11 +104,11 @@ class AmpMetricsStore(SQLBaseStore):
         def _count(txn):
             sql = """
                 SELECT count(*)
-                FROM (SELECT user_id FROM user_stats_historical
-                        WHERE total_events > 0 GROUP BY user_id) AS u INNER JOIN
+                FROM (SELECT sender AS user_id FROM events
+                        GROUP BY user_id LIMIT 1) AS u INNER JOIN
                         (SELECT name AS user_id FROM users
                         WHERE is_guest = 0 AND deactivated = 0 AND user_type IS NULL)
-                        AS v ON u.user_id = v.user_id)
+                        AS v ON u.user_id = v.user_id
             """
             txn.execute(sql)
             (count,) = txn.fetchone()
