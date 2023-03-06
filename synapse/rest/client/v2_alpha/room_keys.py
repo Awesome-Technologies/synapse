@@ -323,7 +323,7 @@ class RoomKeysVersionServlet(RestServlet):
             "auth_data": "dGhpcyBzaG91bGQgYWN0dWFsbHkgYmUgZW5jcnlwdGVkIGpzb24K"
         }
         """
-        requester = await self.auth.get_user_by_req(request, allow_guest=False)
+        requester = await self.auth.get_user_by_req(request, allow_guest=True)
         user_id = requester.user.to_string()
 
         try:

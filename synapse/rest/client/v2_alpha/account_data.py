@@ -84,7 +84,7 @@ class RoomAccountDataServlet(RestServlet):
         self.handler = hs.get_account_data_handler()
 
     async def on_PUT(self, request, user_id, room_id, account_data_type):
-        requester = await self.auth.get_user_by_req(request)
+        requester = await self.auth.get_user_by_req(request, allow_guest=True)
         if user_id != requester.user.to_string():
             raise AuthError(403, "Cannot add account data for other users.")
 
