@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,7 +26,7 @@ from synapse.http.site import SynapseRequest
 from synapse.types import UserID, map_username_to_mxid_localpart
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +82,7 @@ class CasHandler:
         # the SsoIdentityProvider protocol type.
         self.idp_icon = None
         self.idp_brand = None
+        self.unstable_idp_brand = None
 
         self._sso_handler = hs.get_sso_handler()
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2020 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -331,13 +330,9 @@ class PurgeEventsStore(StateGroupWorkerStore, SQLBaseStore):
         txn.executemany(
             """
             DELETE FROM event_auth_chain_links WHERE
-            (origin_chain_id = ? AND origin_sequence_number = ?) OR
-            (target_chain_id = ? AND target_sequence_number = ?)
+            origin_chain_id = ? AND origin_sequence_number = ?
             """,
-            (
-                (chain_id, seq_num, chain_id, seq_num)
-                for (chain_id, seq_num) in referenced_chain_id_tuples
-            ),
+            referenced_chain_id_tuples,
         )
 
         # Now we delete tables which lack an index on room_id but have one on event_id

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from synapse.logging.opentracing import log_kv, set_tag, trace
 from synapse.replication.tcp.streams import ToDeviceStream
@@ -115,7 +114,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
     async def get_new_messages_for_device(
         self,
         user_id: str,
-        device_id: str,
+        device_id: Optional[str],
         last_stream_id: int,
         current_stream_id: int,
         limit: int = 100,
@@ -163,7 +162,7 @@ class DeviceInboxWorkerStore(SQLBaseStore):
 
     @trace
     async def delete_messages_for_device(
-        self, user_id: str, device_id: str, up_to_stream_id: int
+        self, user_id: str, device_id: Optional[str], up_to_stream_id: int
     ) -> int:
         """
         Args:

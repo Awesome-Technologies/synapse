@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,9 +17,8 @@ import tempfile
 from binascii import unhexlify
 from io import BytesIO
 from typing import Optional
+from unittest.mock import Mock
 from urllib import parse
-
-from mock import Mock
 
 import attr
 from parameterized import parameterized_class
@@ -105,7 +103,7 @@ class MediaStorageTests(unittest.HomeserverTestCase):
         self.assertEqual(test_body, body)
 
 
-@attr.s
+@attr.s(slots=True, frozen=True)
 class _TestImage:
     """An image for testing thumbnailing with the expected results
 
@@ -117,13 +115,15 @@ class _TestImage:
             test should just check for success.
         expected_scaled: The expected bytes from scaled thumbnailing, or None if
             test should just check for a valid image returned.
+        expected_found: True if the file should exist on the server, or False if
+            a 404 is expected.
     """
 
     data = attr.ib(type=bytes)
     content_type = attr.ib(type=bytes)
     extension = attr.ib(type=bytes)
-    expected_cropped = attr.ib(type=Optional[bytes])
-    expected_scaled = attr.ib(type=Optional[bytes])
+    expected_cropped = attr.ib(type=Optional[bytes], default=None)
+    expected_scaled = attr.ib(type=Optional[bytes], default=None)
     expected_found = attr.ib(default=True, type=bool)
 
 
@@ -153,6 +153,21 @@ class _TestImage:
                 ),
             ),
         ),
+        # small png with transparency.
+        (
+            _TestImage(
+                unhexlify(
+                    b"89504e470d0a1a0a0000000d49484452000000010000000101000"
+                    b"00000376ef9240000000274524e5300010194fdae0000000a4944"
+                    b"4154789c636800000082008177cd72b60000000049454e44ae426"
+                    b"082"
+                ),
+                b"image/png",
+                b".png",
+                # Note that we don't check the output since it varies across
+                # different versions of Pillow.
+            ),
+        ),
         # small lossless webp
         (
             _TestImage(
@@ -162,8 +177,6 @@ class _TestImage:
                 ),
                 b"image/webp",
                 b".webp",
-                None,
-                None,
             ),
         ),
         # an empty file
@@ -172,9 +185,7 @@ class _TestImage:
                 b"",
                 b"image/gif",
                 b".gif",
-                None,
-                None,
-                False,
+                expected_found=False,
             ),
         ),
     ],

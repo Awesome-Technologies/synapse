@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014 - 2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -13,12 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import imp
+import importlib.util
 import logging
 import os
 import re
 from collections import Counter
-from typing import Generator, Iterable, List, Optional, TextIO, Tuple
+from typing import Collection, Generator, Iterable, List, Optional, TextIO, Tuple
 
 import attr
 from typing_extensions import Counter as CounterType
@@ -28,7 +27,6 @@ from synapse.storage.database import LoggingDatabaseConnection
 from synapse.storage.engines import BaseDatabaseEngine
 from synapse.storage.engines.postgres import PostgresEngine
 from synapse.storage.types import Cursor
-from synapse.types import Collection
 
 logger = logging.getLogger(__name__)
 
@@ -454,8 +452,13 @@ def _upgrade_existing_database(
                     )
 
                 module_name = "synapse.storage.v%d_%s" % (v, root_name)
-                with open(absolute_path) as python_file:
-                    module = imp.load_source(module_name, absolute_path, python_file)  # type: ignore
+
+                spec = importlib.util.spec_from_file_location(
+                    module_name, absolute_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)  # type: ignore
+
                 logger.info("Running script %s", relative_path)
                 module.run_create(cur, database_engine)  # type: ignore
                 if not is_empty:

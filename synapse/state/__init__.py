@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 #
@@ -20,8 +19,10 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Collection,
     DefaultDict,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Optional,
@@ -46,7 +47,7 @@ from synapse.logging.utils import log_function
 from synapse.state import v1, v2
 from synapse.storage.databases.main.events_worker import EventRedactBehaviour
 from synapse.storage.roommember import ProfileInfo
-from synapse.types import Collection, StateMap
+from synapse.types import StateMap
 from synapse.util.async_helpers import Linearizer
 from synapse.util.caches.expiringcache import ExpiringCache
 from synapse.util.metrics import Measure, measure_func
@@ -515,7 +516,7 @@ class StateResolutionHandler:
             expiry_ms=EVICTION_TIMEOUT_SECONDS * 1000,
             iterable=True,
             reset_expiry_on_get=True,
-        )
+        )  # type: ExpiringCache[FrozenSet[int], _StateCacheEntry]
 
         #
         # stuff for tracking time spent on state-res by room
@@ -536,7 +537,7 @@ class StateResolutionHandler:
         state_groups_ids: Dict[int, StateMap[str]],
         event_map: Optional[Dict[str, EventBase]],
         state_res_store: "StateResolutionStore",
-    ):
+    ) -> _StateCacheEntry:
         """Resolves conflicts between a set of state groups
 
         Always generates a new state group (unless we hit the cache), so should

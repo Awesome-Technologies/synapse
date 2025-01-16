@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 # Copyright 2019, 2020 The Matrix.org Foundation C.I.C.
 #
@@ -25,8 +24,8 @@ from synapse.config.cache import add_resizable_cache
 
 logger = logging.getLogger(__name__)
 
-caches_by_name = {}
-collectors_by_name = {}  # type: Dict
+caches_by_name = {}  # type: Dict[str, Sized]
+collectors_by_name = {}  # type: Dict[str, CacheMetric]
 
 cache_size = Gauge("synapse_util_caches_cache:size", "", ["name"])
 cache_hits = Gauge("synapse_util_caches_cache:hits", "", ["name"])
@@ -116,7 +115,7 @@ def register_cache(
     """
     if resizable:
         if not resize_callback:
-            resize_callback = getattr(cache, "set_cache_factor")
+            resize_callback = cache.set_cache_factor  # type: ignore
         add_resizable_cache(cache_name, resize_callback)
 
     metric = CacheMetric(cache, cache_type, cache_name, collect_callback)

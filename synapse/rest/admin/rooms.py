@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -459,6 +458,9 @@ class JoinRoomAliasServlet(ResolveRoomIdMixin, RestServlet):
     async def on_POST(
         self, request: SynapseRequest, room_identifier: str
     ) -> Tuple[int, JsonDict]:
+        # This will always be set by the time Twisted calls us.
+        assert request.args is not None
+
         requester = await self.auth.get_user_by_req(request)
         await assert_user_is_admin(self.auth, requester.user)
 
@@ -754,7 +756,10 @@ class RoomEventContextServlet(RestServlet):
             results["events_after"], time_now
         )
         results["state"] = await self._event_serializer.serialize_events(
-            results["state"], time_now
+            results["state"],
+            time_now,
+            # No need to bundle aggregations for state events
+            bundle_aggregations=False,
         )
 
         return 200, results
