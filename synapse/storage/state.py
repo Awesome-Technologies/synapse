@@ -91,7 +91,7 @@ class StateFilter:
         Returns:
             The new state filter.
         """
-        type_dict = {}  # type: Dict[str, Optional[Set[str]]]
+        type_dict: Dict[str, Optional[Set[str]]] = {}
         for typ, s in types:
             if typ in type_dict:
                 if type_dict[typ] is None:
@@ -194,7 +194,7 @@ class StateFilter:
         """
 
         where_clause = ""
-        where_args = []  # type: List[str]
+        where_args: List[str] = []
 
         if self.is_full():
             return where_clause, where_args
@@ -540,7 +540,7 @@ class StateGroupStorage:
             state_filter: The state filter used to fetch state from the database.
 
         Returns:
-            A dict from (type, state_key) -> state_event
+            A dict from (type, state_key) -> state_event_id
         """
         state_map = await self.get_state_ids_for_events(
             [event_id], state_filter or StateFilter.all()
@@ -570,8 +570,8 @@ class StateGroupStorage:
         event_id: str,
         room_id: str,
         prev_group: Optional[int],
-        delta_ids: Optional[dict],
-        current_state_ids: dict,
+        delta_ids: Optional[StateMap[str]],
+        current_state_ids: StateMap[str],
     ) -> int:
         """Store a new set of state, returning a newly assigned state group.
 

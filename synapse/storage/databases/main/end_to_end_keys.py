@@ -21,6 +21,7 @@ from canonicaljson import encode_canonical_json
 
 from twisted.enterprise.adbapi import Connection
 
+from synapse.api.constants import DeviceKeyAlgorithms
 from synapse.logging.opentracing import log_kv, set_tag, trace
 from synapse.storage._base import SQLBaseStore, db_to_json
 from synapse.storage.database import DatabasePool, make_in_list_sql_clause
@@ -62,6 +63,13 @@ class EndToEndKeyBackgroundStore(SQLBaseStore):
 
 
 class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
+    def __init__(self, database: DatabasePool, db_conn: Connection, hs: "HomeServer"):
+        super().__init__(database, db_conn, hs)
+
+        self._allow_device_name_lookup_over_federation = (
+            self.hs.config.federation.allow_device_name_lookup_over_federation
+        )
+
     async def get_e2e_device_keys_for_federation_query(
         self, user_id: str
     ) -> Tuple[int, List[JsonDict]]:
@@ -84,7 +92,9 @@ class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
                 if keys:
                     result["keys"] = keys
 
-                device_display_name = device.display_name
+                device_display_name = None
+                if self._allow_device_name_lookup_over_federation:
+                    device_display_name = device.display_name
                 if device_display_name:
                     result["device_display_name"] = device_display_name
 
@@ -238,7 +248,7 @@ class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
 
         txn.execute(sql, query_params)
 
-        result = {}  # type: Dict[str, Dict[str, Optional[DeviceKeyLookupResult]]]
+        result: Dict[str, Dict[str, Optional[DeviceKeyLookupResult]]] = {}
         for (user_id, device_id, display_name, key_json) in txn:
             if include_deleted_devices:
                 deleted_devices.remove((user_id, device_id))
@@ -372,9 +382,15 @@ class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
                 " GROUP BY algorithm"
             )
             txn.execute(sql, (user_id, device_id))
-            result = {}
+
+            # Initially set the key count to 0. This ensures that the client will always
+            # receive *some count*, even if it's 0.
+            result = {DeviceKeyAlgorithms.SIGNED_CURVE25519: 0}
+
+            # Override entries with the count of any keys we pulled from the database
             for algorithm, key_count in txn:
                 result[algorithm] = key_count
+
             return result
 
         return await self.db_pool.runInteraction(
@@ -471,7 +487,7 @@ class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
         num_args=1,
     )
     async def _get_bare_e2e_cross_signing_keys_bulk(
-        self, user_ids: List[str]
+        self, user_ids: Iterable[str]
     ) -> Dict[str, Dict[str, dict]]:
         """Returns the cross-signing keys for a set of users.  The output of this
         function should be passed to _get_e2e_cross_signing_signatures_txn if
@@ -495,7 +511,7 @@ class EndToEndKeyWorkerStore(EndToEndKeyBackgroundStore):
     def _get_bare_e2e_cross_signing_keys_bulk_txn(
         self,
         txn: Connection,
-        user_ids: List[str],
+        user_ids: Iterable[str],
     ) -> Dict[str, Dict[str, dict]]:
         """Returns the cross-signing keys for a set of users.  The output of this
         function should be passed to _get_e2e_cross_signing_signatures_txn if
