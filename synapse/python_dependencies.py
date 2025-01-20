@@ -81,7 +81,8 @@ REQUIREMENTS = [
     # Note: 21.1.0 broke `/sync`, see #9936
     "attrs>=19.2.0,!=21.1.0",
     "netaddr>=0.7.18",
-    "Jinja2>=2.9",
+    "Jinja2>=2.9,<=2.11.3",
+    "markupsafe==2.0.1",
     "bleach>=1.4.3",
     "typing-extensions>=3.7.4",
     # We enforce that we have a `cryptography` version that bundles an `openssl`
