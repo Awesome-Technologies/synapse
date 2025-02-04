@@ -168,13 +168,13 @@ class KeyQueryServlet(RestServlet):
         if not isinstance(device_keys, dict):
             raise InvalidAPICallError("'device_keys' must be a JSON object")
 
-        def is_list_of_strings(values: Any) -> bool:
-            return isinstance(values, list) and all(isinstance(v, str) for v in values)
+        # def is_list_of_strings(values: Any) -> bool:
+        #     return isinstance(values, list) and all(isinstance(v, str) for v in values)
 
-        if any(not is_list_of_strings(keys) for keys in device_keys.values()):
-            raise InvalidAPICallError(
-                "'device_keys' values must be a list of strings",
-            )
+        # if any(not is_list_of_strings(keys) for keys in device_keys.values()):
+        #     raise InvalidAPICallError(
+        #         "'device_keys' values must be a list of strings",
+        #     )
 
         result = await self.e2e_keys_handler.query_devices(
             body, timeout, user_id, device_id
