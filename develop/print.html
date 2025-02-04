@@ -10364,29 +10364,6 @@ end of the list.</p>
   &quot;state_events&quot;: 93534
 }
 </code></pre>
-<h1 id="change-room-api"><a class="header" href="#change-room-api">Change Room API</a></h1>
-<p>The Change Room admin API allows server admins to invite members
-to arbitrary (local) rooms and to set power levels of room members.</p>
-<h2 id="usage-2"><a class="header" href="#usage-2">Usage</a></h2>
-<p>A standard request:</p>
-<pre><code>POST /_synapse/admin/v1/rooms/&lt;room_id&gt;
-
-{
-  &quot;invitees&quot;: [&quot;@foo:matrix.org&quot;, &quot;@bar:matrix.org&quot;],
-  &quot;member_roles&quot;: [
-    {
-      &quot;member_id&quot;: &quot;@foo:matrix.org&quot;,
-      &quot;power_level&quot;: 0
-    },
-    {
-      &quot;member_id&quot;: &quot;@foobar:matrix.org&quot;,
-      &quot;power_level&quot;: 100
-    }
-  ]
-}
-</code></pre>
-<p>All parameters (<code>invitees</code> and <code>member_roles</code>)  are optional</p>
-<p>Response: empty <code>&quot;&quot;</code></p>
 <h1 id="room-members-api"><a class="header" href="#room-members-api">Room Members API</a></h1>
 <p>The Room Members admin API allows server admins to get a list of all members of a room.</p>
 <p>The response includes the following fields:</p>
@@ -10407,25 +10384,6 @@ to arbitrary (local) rooms and to set power levels of room members.</p>
   &quot;total&quot;: 3
 }
 </code></pre>
-<h1 id="create-room-api"><a class="header" href="#create-room-api">Create Room API</a></h1>
-<p>The Create Room admin API allows server admins to create new rooms on the server.
-It is possible to specify an owner for the room other than the requester himself.
-In that case, the server admin, who made the request <strong>does not</strong> become a member
-of the created room.</p>
-<p>The API is:</p>
-<pre><code class="language-json">POST /_synapse/admin/v1/rooms
-</code></pre>
-<p>the body parameters are the same as in
-<a href="https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom">https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom</a>
-with one additional optional parameter</p>
-<pre><code class="language-json">{
-    &quot;owner&quot;: &quot;@someuser:example.com&quot;
-}
-</code></pre>
-<p>To use it, you will need to authenticate by providing an <code>access_token</code> for a
-server admin: see <a href="admin_api/README.rst">README.rst</a>.</p>
-<p>The response body is identical to the one of
-<a href="https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom">https://matrix.org/docs/spec/client_server/r0.6.1#post-matrix-client-r0-createroom</a></p>
 <h1 id="room-state-api"><a class="header" href="#room-state-api">Room State API</a></h1>
 <p>The Room State admin API allows server admins to get a list of all state events in a room.</p>
 <p>The response includes the following fields:</p>
