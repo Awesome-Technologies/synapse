@@ -1,3 +1,5 @@
+Synapse is now actively maintained at element-hq/synapse, therefore a new fork has been made
+
 ================
 Synapse |shield|
 ================
