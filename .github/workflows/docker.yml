@@ -4,7 +4,7 @@ name: Build docker images
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["AMP*/*", "Caritas/*"]
     branches: [ master, main, develop ]
   workflow_dispatch:
 
@@ -45,13 +45,13 @@ jobs:
                   tag=latest
                   ;;
               refs/tags/AMP.chat/*)
-                  tag=amp.chat-${GITHUB_REF#refs/tags/}
+                  tag=amp.chat-${GITHUB_REF#refs/tags/AMP.chat/}
                   ;;
               refs/tags/AMP.care/*)
-                  tag=amp.care-${GITHUB_REF#refs/tags/}
+                  tag=amp.care-${GITHUB_REF#refs/tags/AMP.care/}
                   ;;
               refs/tags/Caritas/*)
-                  tag=caritas-${GITHUB_REF#refs/tags/}
+                  tag=caritas-${GITHUB_REF#refs/tags/Caritas/}
                   ;;
               *)
                   tag=${GITHUB_SHA}
