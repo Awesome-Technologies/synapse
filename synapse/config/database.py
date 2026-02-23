@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
-# Copyright 2020 The Matrix.org Foundation C.I.C.
+# Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import argparse
 import logging
 import os
 
@@ -34,6 +34,9 @@ DEFAULT_CONFIG = """\
 # 'name' gives the database engine to use: either 'sqlite3' (for SQLite) or
 # 'psycopg2' (for PostgreSQL).
 #
+# 'txn_limit' gives the maximum number of transactions to run per connection
+# before reconnecting. Defaults to 0, which means no limit.
+#
 # 'args' gives options which are passed through to the database engine,
 # except for options starting 'cp_', which are used to configure the Twisted
 # connection pool. For a reference to valid arguments, see:
@@ -54,15 +57,18 @@ DEFAULT_CONFIG = """\
 #
 #database:
 #  name: psycopg2
+#  txn_limit: 10000
 #  args:
 #    user: synapse_user
 #    password: secretpassword
 #    database: synapse
 #    host: localhost
+#    port: 5432
 #    cp_min: 5
 #    cp_max: 10
 #
-# For more information on using Synapse with Postgres, see `docs/postgres.md`.
+# For more information on using Synapse with Postgres,
+# see https://matrix-org.github.io/synapse/latest/postgres.html.
 #
 database:
   name: sqlite3
@@ -114,7 +120,7 @@ class DatabaseConfig(Config):
 
         self.databases = []
 
-    def read_config(self, config, **kwargs):
+    def read_config(self, config, **kwargs) -> None:
         # We *experimentally* support specifying multiple databases via the
         # `databases` key. This is a map from a label to database config in the
         # same format as the `database` config option, plus an extra
@@ -158,12 +164,12 @@ class DatabaseConfig(Config):
             self.databases = [DatabaseConnectionConfig("master", database_config)]
             self.set_databasepath(database_path)
 
-    def generate_config_section(self, data_dir_path, **kwargs):
+    def generate_config_section(self, data_dir_path, **kwargs) -> str:
         return DEFAULT_CONFIG % {
             "database_path": os.path.join(data_dir_path, "homeserver.db")
         }
 
-    def read_arguments(self, args):
+    def read_arguments(self, args: argparse.Namespace) -> None:
         """
         Cases for the cli input:
           - If no databases are configured and no database_path is set, raise.
@@ -189,7 +195,7 @@ class DatabaseConfig(Config):
         else:
             logger.warning(NON_SQLITE_DATABASE_PATH_WARNING)
 
-    def set_databasepath(self, database_path):
+    def set_databasepath(self, database_path: str) -> None:
 
         if database_path != ":memory:":
             database_path = self.abspath(database_path)
@@ -197,7 +203,7 @@ class DatabaseConfig(Config):
         self.databases[0].config["args"]["database"] = database_path
 
     @staticmethod
-    def add_arguments(parser):
+    def add_arguments(parser: argparse.ArgumentParser) -> None:
         db_group = parser.add_argument_group("database")
         db_group.add_argument(
             "-d",

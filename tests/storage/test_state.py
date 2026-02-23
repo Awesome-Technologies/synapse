@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright 2018 New Vector Ltd
+# Copyright 2018-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,24 +14,20 @@
 
 import logging
 
-from twisted.internet import defer
+from frozendict import frozendict
 
 from synapse.api.constants import EventTypes, Membership
 from synapse.api.room_versions import RoomVersions
 from synapse.storage.state import StateFilter
 from synapse.types import RoomID, UserID
 
-import tests.unittest
-import tests.utils
+from tests.unittest import HomeserverTestCase, TestCase
 
 logger = logging.getLogger(__name__)
 
 
-class StateStoreTestCase(tests.unittest.TestCase):
-    @defer.inlineCallbacks
-    def setUp(self):
-        hs = yield tests.utils.setup_test_homeserver(self.addCleanup)
-
+class StateStoreTestCase(HomeserverTestCase):
+    def prepare(self, reactor, clock, hs):
         self.store = hs.get_datastore()
         self.storage = hs.get_storage()
         self.state_datastore = self.storage.state.stores.state
@@ -44,7 +39,7 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         self.room = RoomID.from_string("!abc123:test")
 
-        yield defer.ensureDeferred(
+        self.get_success(
             self.store.store_room(
                 self.room.to_string(),
                 room_creator_user_id="@creator:text",
@@ -53,7 +48,6 @@ class StateStoreTestCase(tests.unittest.TestCase):
             )
         )
 
-    @defer.inlineCallbacks
     def inject_state_event(self, room, sender, typ, state_key, content):
         builder = self.event_builder_factory.for_room_version(
             RoomVersions.V1,
@@ -66,13 +60,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
             },
         )
 
-        event, context = yield defer.ensureDeferred(
+        event, context = self.get_success(
             self.event_creation_handler.create_new_client_event(builder)
         )
 
-        yield defer.ensureDeferred(
-            self.storage.persistence.persist_event(event, context)
-        )
+        self.get_success(self.storage.persistence.persist_event(event, context))
 
         return event
 
@@ -82,16 +74,13 @@ class StateStoreTestCase(tests.unittest.TestCase):
             self.assertEqual(s1[t].event_id, s2[t].event_id)
         self.assertEqual(len(s1), len(s2))
 
-    @defer.inlineCallbacks
     def test_get_state_groups_ids(self):
-        e1 = yield self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        e2 = yield self.inject_state_event(
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
         )
 
-        state_group_map = yield defer.ensureDeferred(
+        state_group_map = self.get_success(
             self.storage.state.get_state_groups_ids(self.room, [e2.event_id])
         )
         self.assertEqual(len(state_group_map), 1)
@@ -101,16 +90,13 @@ class StateStoreTestCase(tests.unittest.TestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
-    @defer.inlineCallbacks
     def test_get_state_groups(self):
-        e1 = yield self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        e2 = yield self.inject_state_event(
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
         )
 
-        state_group_map = yield defer.ensureDeferred(
+        state_group_map = self.get_success(
             self.storage.state.get_state_groups(self.room, [e2.event_id])
         )
         self.assertEqual(len(state_group_map), 1)
@@ -118,32 +104,28 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         self.assertEqual({ev.event_id for ev in state_list}, {e1.event_id, e2.event_id})
 
-    @defer.inlineCallbacks
     def test_get_state_for_event(self):
-
         # this defaults to a linear DAG as each new injection defaults to whatever
         # forward extremities are currently in the DB for this room.
-        e1 = yield self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        e2 = yield self.inject_state_event(
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
         )
-        e3 = yield self.inject_state_event(
+        e3 = self.inject_state_event(
             self.room,
             self.u_alice,
             EventTypes.Member,
             self.u_alice.to_string(),
             {"membership": Membership.JOIN},
         )
-        e4 = yield self.inject_state_event(
+        e4 = self.inject_state_event(
             self.room,
             self.u_bob,
             EventTypes.Member,
             self.u_bob.to_string(),
             {"membership": Membership.JOIN},
         )
-        e5 = yield self.inject_state_event(
+        e5 = self.inject_state_event(
             self.room,
             self.u_bob,
             EventTypes.Member,
@@ -152,9 +134,7 @@ class StateStoreTestCase(tests.unittest.TestCase):
         )
 
         # check we get the full state as of the final event
-        state = yield defer.ensureDeferred(
-            self.storage.state.get_state_for_event(e5.event_id)
-        )
+        state = self.get_success(self.storage.state.get_state_for_event(e5.event_id))
 
         self.assertIsNotNone(e4)
 
@@ -170,7 +150,7 @@ class StateStoreTestCase(tests.unittest.TestCase):
         )
 
         # check we can filter to the m.room.name event (with a '' state key)
-        state = yield defer.ensureDeferred(
+        state = self.get_success(
             self.storage.state.get_state_for_event(
                 e5.event_id, StateFilter.from_types([(EventTypes.Name, "")])
             )
@@ -179,7 +159,7 @@ class StateStoreTestCase(tests.unittest.TestCase):
         self.assertStateMapEqual({(e2.type, e2.state_key): e2}, state)
 
         # check we can filter to the m.room.name event (with a wildcard None state key)
-        state = yield defer.ensureDeferred(
+        state = self.get_success(
             self.storage.state.get_state_for_event(
                 e5.event_id, StateFilter.from_types([(EventTypes.Name, None)])
             )
@@ -188,7 +168,7 @@ class StateStoreTestCase(tests.unittest.TestCase):
         self.assertStateMapEqual({(e2.type, e2.state_key): e2}, state)
 
         # check we can grab the m.room.member events (with a wildcard None state key)
-        state = yield defer.ensureDeferred(
+        state = self.get_success(
             self.storage.state.get_state_for_event(
                 e5.event_id, StateFilter.from_types([(EventTypes.Member, None)])
             )
@@ -200,11 +180,13 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # check we can grab a specific room member without filtering out the
         # other event types
-        state = yield defer.ensureDeferred(
+        state = self.get_success(
             self.storage.state.get_state_for_event(
                 e5.event_id,
                 state_filter=StateFilter(
-                    types={EventTypes.Member: {self.u_alice.to_string()}},
+                    types=frozendict(
+                        {EventTypes.Member: frozenset({self.u_alice.to_string()})}
+                    ),
                     include_others=True,
                 ),
             )
@@ -220,11 +202,12 @@ class StateStoreTestCase(tests.unittest.TestCase):
         )
 
         # check that we can grab everything except members
-        state = yield defer.ensureDeferred(
+        state = self.get_success(
             self.storage.state.get_state_for_event(
                 e5.event_id,
                 state_filter=StateFilter(
-                    types={EventTypes.Member: set()}, include_others=True
+                    types=frozendict({EventTypes.Member: frozenset()}),
+                    include_others=True,
                 ),
             )
         )
@@ -238,21 +221,18 @@ class StateStoreTestCase(tests.unittest.TestCase):
         #######################################################
 
         room_id = self.room.to_string()
-        group_ids = yield defer.ensureDeferred(
+        group_ids = self.get_success(
             self.storage.state.get_state_groups_ids(room_id, [e5.event_id])
         )
         group = list(group_ids.keys())[0]
 
         # test _get_state_for_group_using_cache correctly filters out members
         # with types=[]
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: set()}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
             ),
         )
 
@@ -265,14 +245,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
             state_dict,
         )
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: set()}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
             ),
         )
 
@@ -281,14 +258,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with wildcard types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: None}, include_others=True
+                types=frozendict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -301,14 +275,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
             state_dict,
         )
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: None}, include_others=True
+                types=frozendict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -324,14 +295,12 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=True,
             ),
         )
 
@@ -344,14 +313,12 @@ class StateStoreTestCase(tests.unittest.TestCase):
             state_dict,
         )
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=True,
             ),
         )
 
@@ -360,14 +327,12 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=False
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=False,
             ),
         )
 
@@ -377,14 +342,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
         #######################################################
         # deliberately remove e2 (room name) from the _state_group_cache
 
-        (
-            is_all,
-            known_absent,
-            state_dict_ids,
-        ) = self.state_datastore._state_group_cache.get(group)
+        cache_entry = self.state_datastore._state_group_cache.get(group)
+        state_dict_ids = cache_entry.value
 
-        self.assertEqual(is_all, True)
-        self.assertEqual(known_absent, set())
+        self.assertEqual(cache_entry.full, True)
+        self.assertEqual(cache_entry.known_absent, set())
         self.assertDictEqual(
             state_dict_ids,
             {
@@ -403,14 +365,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
             fetched_keys=((e1.type, e1.state_key),),
         )
 
-        (
-            is_all,
-            known_absent,
-            state_dict_ids,
-        ) = self.state_datastore._state_group_cache.get(group)
+        cache_entry = self.state_datastore._state_group_cache.get(group)
+        state_dict_ids = cache_entry.value
 
-        self.assertEqual(is_all, False)
-        self.assertEqual(known_absent, {(e1.type, e1.state_key)})
+        self.assertEqual(cache_entry.full, False)
+        self.assertEqual(cache_entry.known_absent, {(e1.type, e1.state_key)})
         self.assertDictEqual(state_dict_ids, {(e1.type, e1.state_key): e1.event_id})
 
         ############################################
@@ -419,14 +378,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
         # test _get_state_for_group_using_cache correctly filters out members
         # with types=[]
         room_id = self.room.to_string()
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: set()}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
             ),
         )
 
@@ -434,14 +390,11 @@ class StateStoreTestCase(tests.unittest.TestCase):
         self.assertDictEqual({(e1.type, e1.state_key): e1.event_id}, state_dict)
 
         room_id = self.room.to_string()
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: set()}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset()}), include_others=True
             ),
         )
 
@@ -450,28 +403,22 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # wildcard types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: None}, include_others=True
+                types=frozendict({EventTypes.Member: None}), include_others=True
             ),
         )
 
         self.assertEqual(is_all, False)
         self.assertDictEqual({(e1.type, e1.state_key): e1.event_id}, state_dict)
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: None}, include_others=True
+                types=frozendict({EventTypes.Member: None}), include_others=True
             ),
         )
 
@@ -486,28 +433,24 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=True,
             ),
         )
 
         self.assertEqual(is_all, False)
         self.assertDictEqual({(e1.type, e1.state_key): e1.event_id}, state_dict)
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=True
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=True,
             ),
         )
 
@@ -516,30 +459,536 @@ class StateStoreTestCase(tests.unittest.TestCase):
 
         # test _get_state_for_group_using_cache correctly filters in members
         # with specific types
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=False
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=False,
             ),
         )
 
         self.assertEqual(is_all, False)
         self.assertDictEqual({}, state_dict)
 
-        (
-            state_dict,
-            is_all,
-        ) = yield self.state_datastore._get_state_for_group_using_cache(
+        (state_dict, is_all,) = self.state_datastore._get_state_for_group_using_cache(
             self.state_datastore._state_group_members_cache,
             group,
             state_filter=StateFilter(
-                types={EventTypes.Member: {e5.state_key}}, include_others=False
+                types=frozendict({EventTypes.Member: frozenset({e5.state_key})}),
+                include_others=False,
             ),
         )
 
         self.assertEqual(is_all, True)
         self.assertDictEqual({(e5.type, e5.state_key): e5.event_id}, state_dict)
+
+
+class StateFilterDifferenceTestCase(TestCase):
+    def assert_difference(
+        self, minuend: StateFilter, subtrahend: StateFilter, expected: StateFilter
+    ):
+        self.assertEqual(
+            minuend.approx_difference(subtrahend),
+            expected,
+            f"StateFilter difference not correct:\n\n\t{minuend!r}\nminus\n\t{subtrahend!r}\nwas\n\t{minuend.approx_difference(subtrahend)}\nexpected\n\t{expected}",
+        )
+
+    def test_state_filter_difference_no_include_other_minus_no_include_other(self):
+        """
+        Tests the StateFilter.approx_difference method
+        where, in a.approx_difference(b), both a and b do not have the
+        include_others flag set.
+        """
+        # (wildcard on state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.Create: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.CanonicalAlias: None},
+                include_others=False,
+            ),
+            StateFilter.freeze({EventTypes.Create: None}, include_others=False),
+        )
+
+        # (wildcard on state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        self.assert_difference(
+            StateFilter.freeze({EventTypes.Member: None}, include_others=False),
+            StateFilter.freeze(
+                {EventTypes.Member: {"@wombat:spqr"}},
+                include_others=False,
+            ),
+            StateFilter.freeze({EventTypes.Member: None}, include_others=False),
+        )
+
+        # (wildcard on state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.CanonicalAlias: {""}},
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (specific state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+        )
+
+    def test_state_filter_difference_include_other_minus_no_include_other(self):
+        """
+        Tests the StateFilter.approx_difference method
+        where, in a.approx_difference(b), only a has the include_others flag set.
+        """
+        # (wildcard on state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.Create: None},
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.CanonicalAlias: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Create: None,
+                    EventTypes.Member: set(),
+                    EventTypes.CanonicalAlias: set(),
+                },
+                include_others=True,
+            ),
+        )
+
+        # (wildcard on state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        # This also shows that the resultant state filter is normalised.
+        self.assert_difference(
+            StateFilter.freeze({EventTypes.Member: None}, include_others=True),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                    EventTypes.Create: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter(types=frozendict(), include_others=True),
+        )
+
+        # (wildcard on state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=False,
+            ),
+            StateFilter(
+                types=frozendict(),
+                include_others=True,
+            ),
+        )
+
+        # (specific state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.CanonicalAlias: {""},
+                    EventTypes.Member: set(),
+                },
+                include_others=True,
+            ),
+        )
+
+        # (specific state keys) - (specific state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+        )
+
+        # (specific state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+        )
+
+    def test_state_filter_difference_include_other_minus_include_other(self):
+        """
+        Tests the StateFilter.approx_difference method
+        where, in a.approx_difference(b), both a and b have the include_others
+        flag set.
+        """
+        # (wildcard on state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.Create: None},
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.CanonicalAlias: None},
+                include_others=True,
+            ),
+            StateFilter(types=frozendict(), include_others=False),
+        )
+
+        # (wildcard on state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        self.assert_difference(
+            StateFilter.freeze({EventTypes.Member: None}, include_others=True),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.CanonicalAlias: None},
+                include_others=False,
+            ),
+        )
+
+        # (wildcard on state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=True,
+            ),
+            StateFilter(
+                types=frozendict(),
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                    EventTypes.Create: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                    EventTypes.Create: set(),
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@spqr:spqr"},
+                    EventTypes.Create: {""},
+                },
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                },
+                include_others=False,
+            ),
+        )
+
+    def test_state_filter_difference_no_include_other_minus_include_other(self):
+        """
+        Tests the StateFilter.approx_difference method
+        where, in a.approx_difference(b), only b has the include_others flag set.
+        """
+        # (wildcard on state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.Create: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None, EventTypes.CanonicalAlias: None},
+                include_others=True,
+            ),
+            StateFilter(types=frozendict(), include_others=False),
+        )
+
+        # (wildcard on state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        self.assert_difference(
+            StateFilter.freeze({EventTypes.Member: None}, include_others=False),
+            StateFilter.freeze(
+                {EventTypes.Member: {"@wombat:spqr"}},
+                include_others=True,
+            ),
+            StateFilter.freeze({EventTypes.Member: None}, include_others=False),
+        )
+
+        # (wildcard on state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (wildcard on state keys):
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {EventTypes.Member: None},
+                include_others=True,
+            ),
+            StateFilter(
+                types=frozendict(),
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (specific state keys)
+        # This one is an over-approximation because we can't represent
+        # 'all state keys except a few named examples'
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr"},
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@spqr:spqr"},
+                },
+                include_others=False,
+            ),
+        )
+
+        # (specific state keys) - (no state keys)
+        self.assert_difference(
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                    EventTypes.CanonicalAlias: {""},
+                },
+                include_others=False,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: set(),
+                },
+                include_others=True,
+            ),
+            StateFilter.freeze(
+                {
+                    EventTypes.Member: {"@wombat:spqr", "@spqr:spqr"},
+                },
+                include_others=False,
+            ),
+        )
+
+    def test_state_filter_difference_simple_cases(self):
+        """
+        Tests some very simple cases of the StateFilter approx_difference,
+        that are not explicitly tested by the more in-depth tests.
+        """
+
+        self.assert_difference(StateFilter.all(), StateFilter.all(), StateFilter.none())
+
+        self.assert_difference(
+            StateFilter.all(),
+            StateFilter.none(),
+            StateFilter.all(),
+        )

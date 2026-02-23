@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2017 Vector Creations Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,20 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import TYPE_CHECKING
+
 from synapse.storage.database import DatabasePool
 from synapse.storage.databases.main.client_ips import LAST_SEEN_GRANULARITY
 from synapse.util.caches.lrucache import LruCache
 
 from ._base import BaseSlavedStore
 
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
+
 
 class SlavedClientIpStore(BaseSlavedStore):
-    def __init__(self, database: DatabasePool, db_conn, hs):
+    def __init__(self, database: DatabasePool, db_conn, hs: "HomeServer"):
         super().__init__(database, db_conn, hs)
 
-        self.client_ip_last_seen = LruCache(
-            cache_name="client_ip_last_seen", keylen=4, max_size=50000
-        )  # type: LruCache[tuple, int]
+        self.client_ip_last_seen: LruCache[tuple, int] = LruCache(
+            cache_name="client_ip_last_seen", max_size=50000
+        )
 
     async def insert_client_ip(self, user_id, access_token, ip, user_agent, device_id):
         now = int(self._clock.time_msec())

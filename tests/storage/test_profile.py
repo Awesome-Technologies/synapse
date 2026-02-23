@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright 2014-2016 OpenMarket Ltd
+# Copyright 2014-2021 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,60 +11,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from twisted.test.proto_helpers import MemoryReactor
 
-
-from twisted.internet import defer
-
+from synapse.server import HomeServer
 from synapse.types import UserID
+from synapse.util import Clock
 
 from tests import unittest
-from tests.utils import setup_test_homeserver
 
 
-class ProfileStoreTestCase(unittest.TestCase):
-    @defer.inlineCallbacks
-    def setUp(self):
-        hs = yield setup_test_homeserver(self.addCleanup)
-
+class ProfileStoreTestCase(unittest.HomeserverTestCase):
+    def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.store = hs.get_datastore()
 
         self.u_frank = UserID.from_string("@frank:test")
 
-    @defer.inlineCallbacks
-    def test_displayname(self):
-        yield defer.ensureDeferred(self.store.create_profile(self.u_frank.localpart))
+    def test_displayname(self) -> None:
+        self.get_success(self.store.create_profile(self.u_frank.localpart))
 
-        yield defer.ensureDeferred(
+        self.get_success(
             self.store.set_profile_displayname(self.u_frank.localpart, "Frank")
         )
 
         self.assertEquals(
             "Frank",
             (
-                yield defer.ensureDeferred(
+                self.get_success(
                     self.store.get_profile_displayname(self.u_frank.localpart)
                 )
             ),
         )
 
         # test set to None
-        yield defer.ensureDeferred(
+        self.get_success(
             self.store.set_profile_displayname(self.u_frank.localpart, None)
         )
 
         self.assertIsNone(
-            (
-                yield defer.ensureDeferred(
-                    self.store.get_profile_displayname(self.u_frank.localpart)
-                )
-            )
+            self.get_success(self.store.get_profile_displayname(self.u_frank.localpart))
         )
 
-    @defer.inlineCallbacks
-    def test_avatar_url(self):
-        yield defer.ensureDeferred(self.store.create_profile(self.u_frank.localpart))
+    def test_avatar_url(self) -> None:
+        self.get_success(self.store.create_profile(self.u_frank.localpart))
 
-        yield defer.ensureDeferred(
+        self.get_success(
             self.store.set_profile_avatar_url(
                 self.u_frank.localpart, "http://my.site/here"
             )
@@ -74,21 +63,17 @@ class ProfileStoreTestCase(unittest.TestCase):
         self.assertEquals(
             "http://my.site/here",
             (
-                yield defer.ensureDeferred(
+                self.get_success(
                     self.store.get_profile_avatar_url(self.u_frank.localpart)
                 )
             ),
         )
 
         # test set to None
-        yield defer.ensureDeferred(
+        self.get_success(
             self.store.set_profile_avatar_url(self.u_frank.localpart, None)
         )
 
         self.assertIsNone(
-            (
-                yield defer.ensureDeferred(
-                    self.store.get_profile_avatar_url(self.u_frank.localpart)
-                )
-            )
+            self.get_success(self.store.get_profile_avatar_url(self.u_frank.localpart))
         )

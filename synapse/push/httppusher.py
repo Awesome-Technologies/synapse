@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2015, 2016 OpenMarket Ltd
 # Copyright 2017 New Vector Ltd
 #
@@ -27,11 +26,12 @@ from synapse.events import EventBase
 from synapse.logging import opentracing
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.push import Pusher, PusherConfig, PusherConfigException
+from synapse.storage.databases.main.event_push_actions import HttpPushAction
 
 from . import push_rule_evaluator, push_tools
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +72,11 @@ class HttpPusher(Pusher):
         self.data = pusher_config.data
         self.backoff_delay = HttpPusher.INITIAL_BACKOFF_SEC
         self.failing_since = pusher_config.failing_since
-        self.timed_call = None  # type: Optional[IDelayedCall]
+        self.timed_call: Optional[IDelayedCall] = None
         self._is_processing = False
-        self._group_unread_count_by_room = hs.config.push_group_unread_count_by_room
+        self._group_unread_count_by_room = (
+            hs.config.push.push_group_unread_count_by_room
+        )
         self._pusherpool = hs.get_pusherpool()
 
         self.data = pusher_config.data
@@ -272,7 +274,7 @@ class HttpPusher(Pusher):
                     )
                     break
 
-    async def _process_one(self, push_action: dict) -> bool:
+    async def _process_one(self, push_action: HttpPushAction) -> bool:
         if "notify" not in push_action["actions"]:
             return True
 
@@ -290,7 +292,7 @@ class HttpPusher(Pusher):
         if rejected is False:
             return False
 
-        if isinstance(rejected, list) or isinstance(rejected, tuple):
+        if isinstance(rejected, (list, tuple)):
             for pk in rejected:
                 if pk != self.pushkey:
                     # for sanity, we only remove the pushkey if it
@@ -366,7 +368,7 @@ class HttpPusher(Pusher):
         if event.type == "m.room.member" and event.is_state():
             d["notification"]["membership"] = event.content["membership"]
             d["notification"]["user_is_target"] = event.state_key == self.user_id
-        if self.hs.config.push_include_content and event.content:
+        if self.hs.config.push.push_include_content and event.content:
             d["notification"]["content"] = event.content
 
         # We no longer send aliases separately, instead, we send the human
@@ -402,10 +404,10 @@ class HttpPusher(Pusher):
             rejected = resp["rejected"]
         return rejected
 
-    async def _send_badge(self, badge):
+    async def _send_badge(self, badge: int) -> None:
         """
         Args:
-            badge (int): number of unread messages
+            badge: number of unread messages
         """
         logger.debug("Sending updated badge count %d to %s", badge, self.name)
         d = {

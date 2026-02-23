@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2014-2016 OpenMarket Ltd
 # Copyright 2020-2021 The Matrix.org Foundation C.I.C.
 #
@@ -15,18 +14,17 @@
 # limitations under the License.
 
 import logging
-from typing import IO, TYPE_CHECKING
-
-from twisted.web.server import Request
+from typing import IO, TYPE_CHECKING, Dict, List, Optional
 
 from synapse.api.errors import Codes, SynapseError
 from synapse.http.server import DirectServeJsonResource, respond_with_json
-from synapse.http.servlet import parse_string
+from synapse.http.servlet import parse_bytes_from_args
+from synapse.http.site import SynapseRequest
 from synapse.rest.media.v1.media_storage import SpamMediaException
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
     from synapse.rest.media.v1.media_repository import MediaRepository
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +41,13 @@ class UploadResource(DirectServeJsonResource):
         self.clock = hs.get_clock()
         self.server_name = hs.hostname
         self.auth = hs.get_auth()
-        self.max_upload_size = hs.config.max_upload_size
+        self.max_upload_size = hs.config.media.max_upload_size
         self.clock = hs.get_clock()
 
-    async def _async_render_OPTIONS(self, request: Request) -> None:
+    async def _async_render_OPTIONS(self, request: SynapseRequest) -> None:
         respond_with_json(request, 200, {}, send_cors=True)
 
-    async def _async_render_POST(self, request: Request) -> None:
+    async def _async_render_POST(self, request: SynapseRequest) -> None:
         requester = await self.auth.get_user_by_req(request, allow_guest=True, allow_limited=True)
         # TODO: The checks here are a bit late. The content will have
         # already been uploaded to a tmp file at this point
@@ -63,10 +61,11 @@ class UploadResource(DirectServeJsonResource):
                 errcode=Codes.TOO_LARGE,
             )
 
-        upload_name = parse_string(request, b"filename", encoding=None)
-        if upload_name:
+        args: Dict[bytes, List[bytes]] = request.args  # type: ignore
+        upload_name_bytes = parse_bytes_from_args(args, "filename")
+        if upload_name_bytes:
             try:
-                upload_name = upload_name.decode("utf8")
+                upload_name: Optional[str] = upload_name_bytes.decode("utf8")
             except UnicodeDecodeError:
                 raise SynapseError(
                     msg="Invalid UTF-8 filename parameter: %r" % (upload_name), code=400
@@ -83,14 +82,14 @@ class UploadResource(DirectServeJsonResource):
             assert content_type_headers  # for mypy
             media_type = content_type_headers[0].decode("ascii")
         else:
-            raise SynapseError(msg="Upload request missing 'Content-Type'", code=400)
+            media_type = "application/octet-stream"
 
         # if headers.hasHeader(b"Content-Disposition"):
         #     disposition = headers.getRawHeaders(b"Content-Disposition")[0]
         # TODO(markjh): parse content-dispostion
 
         try:
-            content = request.content  # type: IO  # type: ignore
+            content: IO = request.content  # type: ignore
             content_uri = await self.media_repo.create_content(
                 media_type, upload_name, content, content_length, requester.user
             )

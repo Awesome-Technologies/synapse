@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-# Copyright 2019 Matrix.org Foundation C.I.C.
+# Copyright 2019-2021 Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +15,11 @@
 import os
 import re
 import threading
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
+
+import attr
+
+from synapse.python_dependencies import DependencyException, check_requirements
 
 from ._base import Config, ConfigError
 
@@ -24,7 +27,7 @@ from ._base import Config, ConfigError
 _CACHE_PREFIX = "SYNAPSE_CACHE_FACTOR"
 
 # Map from canonicalised cache name to cache.
-_CACHES = {}
+_CACHES: Dict[str, Callable[[float], None]] = {}
 
 # a lock on the contents of _CACHES
 _CACHES_LOCK = threading.Lock()
@@ -33,13 +36,13 @@ _DEFAULT_FACTOR_SIZE = 0.5
 _DEFAULT_EVENT_CACHE_SIZE = "10K"
 
 
+@attr.s(slots=True, auto_attribs=True)
 class CacheProperties:
-    def __init__(self):
-        # The default factor size for all caches
-        self.default_factor_size = float(
-            os.environ.get(_CACHE_PREFIX, _DEFAULT_FACTOR_SIZE)
-        )
-        self.resize_all_caches_func = None
+    # The default factor size for all caches
+    default_factor_size: float = float(
+        os.environ.get(_CACHE_PREFIX, _DEFAULT_FACTOR_SIZE)
+    )
+    resize_all_caches_func: Optional[Callable[[], None]] = None
 
 
 properties = CacheProperties()
@@ -59,7 +62,9 @@ def _canonicalise_cache_name(cache_name: str) -> str:
     return cache_name.lower()
 
 
-def add_resizable_cache(cache_name: str, cache_resize_callback: Callable):
+def add_resizable_cache(
+    cache_name: str, cache_resize_callback: Callable[[float], None]
+) -> None:
     """Register a cache that's size can dynamically change
 
     Args:
@@ -88,7 +93,7 @@ class CacheConfig(Config):
     _environ = os.environ
 
     @staticmethod
-    def reset():
+    def reset() -> None:
         """Resets the caches to their defaults. Used for tests."""
         properties.default_factor_size = float(
             os.environ.get(_CACHE_PREFIX, _DEFAULT_FACTOR_SIZE)
@@ -97,7 +102,7 @@ class CacheConfig(Config):
         with _CACHES_LOCK:
             _CACHES.clear()
 
-    def generate_config_section(self, **kwargs):
+    def generate_config_section(self, **kwargs) -> str:
         return """\
         ## Caching ##
 
@@ -113,42 +118,57 @@ class CacheConfig(Config):
         #event_cache_size: 10K
 
         caches:
-           # Controls the global cache factor, which is the default cache factor
-           # for all caches if a specific factor for that cache is not otherwise
-           # set.
-           #
-           # This can also be set by the "SYNAPSE_CACHE_FACTOR" environment
-           # variable. Setting by environment variable takes priority over
-           # setting through the config file.
-           #
-           # Defaults to 0.5, which will half the size of all caches.
-           #
-           #global_factor: 1.0
+          # Controls the global cache factor, which is the default cache factor
+          # for all caches if a specific factor for that cache is not otherwise
+          # set.
+          #
+          # This can also be set by the "SYNAPSE_CACHE_FACTOR" environment
+          # variable. Setting by environment variable takes priority over
+          # setting through the config file.
+          #
+          # Defaults to 0.5, which will half the size of all caches.
+          #
+          #global_factor: 1.0
 
-           # A dictionary of cache name to cache factor for that individual
-           # cache. Overrides the global cache factor for a given cache.
-           #
-           # These can also be set through environment variables comprised
-           # of "SYNAPSE_CACHE_FACTOR_" + the name of the cache in capital
-           # letters and underscores. Setting by environment variable
-           # takes priority over setting through the config file.
-           # Ex. SYNAPSE_CACHE_FACTOR_GET_USERS_WHO_SHARE_ROOM_WITH_USER=2.0
-           #
-           # Some caches have '*' and other characters that are not
-           # alphanumeric or underscores. These caches can be named with or
-           # without the special characters stripped. For example, to specify
-           # the cache factor for `*stateGroupCache*` via an environment
-           # variable would be `SYNAPSE_CACHE_FACTOR_STATEGROUPCACHE=2.0`.
-           #
-           per_cache_factors:
-             #get_users_who_share_room_with_user: 2.0
+          # A dictionary of cache name to cache factor for that individual
+          # cache. Overrides the global cache factor for a given cache.
+          #
+          # These can also be set through environment variables comprised
+          # of "SYNAPSE_CACHE_FACTOR_" + the name of the cache in capital
+          # letters and underscores. Setting by environment variable
+          # takes priority over setting through the config file.
+          # Ex. SYNAPSE_CACHE_FACTOR_GET_USERS_WHO_SHARE_ROOM_WITH_USER=2.0
+          #
+          # Some caches have '*' and other characters that are not
+          # alphanumeric or underscores. These caches can be named with or
+          # without the special characters stripped. For example, to specify
+          # the cache factor for `*stateGroupCache*` via an environment
+          # variable would be `SYNAPSE_CACHE_FACTOR_STATEGROUPCACHE=2.0`.
+          #
+          per_cache_factors:
+            #get_users_who_share_room_with_user: 2.0
+
+          # Controls how long an entry can be in a cache without having been
+          # accessed before being evicted. Defaults to None, which means
+          # entries are never evicted based on time.
+          #
+          #expiry_time: 30m
+
+          # Controls how long the results of a /sync request are cached for after
+          # a successful response is returned. A higher duration can help clients with
+          # intermittent connections, at the cost of higher memory usage.
+          #
+          # By default, this is zero, which means that sync responses are not cached
+          # at all.
+          #
+          #sync_response_cache_duration: 2m
         """
 
-    def read_config(self, config, **kwargs):
+    def read_config(self, config, **kwargs) -> None:
         self.event_cache_size = self.parse_size(
             config.get("event_cache_size", _DEFAULT_EVENT_CACHE_SIZE)
         )
-        self.cache_factors = {}  # type: Dict[str, float]
+        self.cache_factors: Dict[str, float] = {}
 
         cache_config = config.get("caches") or {}
         self.global_factor = cache_config.get(
@@ -188,6 +208,25 @@ class CacheConfig(Config):
                 )
             self.cache_factors[cache] = factor
 
+        self.track_memory_usage = cache_config.get("track_memory_usage", False)
+        if self.track_memory_usage:
+            try:
+                check_requirements("cache_memory")
+            except DependencyException as e:
+                raise ConfigError(
+                    e.message  # noqa: B306, DependencyException.message is a property
+                )
+
+        expiry_time = cache_config.get("expiry_time")
+        if expiry_time:
+            self.expiry_time_msec: Optional[int] = self.parse_duration(expiry_time)
+        else:
+            self.expiry_time_msec = None
+
+        self.sync_response_cache_duration = self.parse_duration(
+            cache_config.get("sync_response_cache_duration", 0)
+        )
+
         # Resize all caches (if necessary) with the new factors we've loaded
         self.resize_all_caches()
 
@@ -195,7 +234,7 @@ class CacheConfig(Config):
         # needing an instance of Config
         properties.resize_all_caches_func = self.resize_all_caches
 
-    def resize_all_caches(self):
+    def resize_all_caches(self) -> None:
         """Ensure all cache sizes are up to date
 
         For each cache, run the mapped callback function with either

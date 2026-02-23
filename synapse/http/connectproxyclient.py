@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 The Matrix.org Foundation C.I.C.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import logging
+from typing import Optional
 
+import attr
 from zope.interface import implementer
 
 from twisted.internet import defer, protocol
 from twisted.internet.error import ConnectError
-from twisted.internet.interfaces import IStreamClientEndpoint
-from twisted.internet.protocol import connectionDone
+from twisted.internet.interfaces import IReactorCore, IStreamClientEndpoint
+from twisted.internet.protocol import ClientFactory, Protocol, connectionDone
 from twisted.web import http
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,22 @@ logger = logging.getLogger(__name__)
 
 class ProxyConnectError(ConnectError):
     pass
+
+
+@attr.s
+class ProxyCredentials:
+    username_password = attr.ib(type=bytes)
+
+    def as_proxy_authorization_value(self) -> bytes:
+        """
+        Return the value for a Proxy-Authorization header (i.e. 'Basic abdef==').
+
+        Returns:
+            A transformation of the authentication string the encoded value for
+            a Proxy-Authorization header.
+        """
+        # Encode as base64 and prepend the authorization type
+        return b"Basic " + base64.encodebytes(self.username_password)
 
 
 @implementer(IStreamClientEndpoint)
@@ -43,23 +61,37 @@ class HTTPConnectProxyEndpoint:
 
     Args:
         reactor: the Twisted reactor to use for the connection
-        proxy_endpoint (IStreamClientEndpoint): the endpoint to use to connect to the
-            proxy
-        host (bytes): hostname that we want to CONNECT to
-        port (int): port that we want to connect to
+        proxy_endpoint: the endpoint to use to connect to the proxy
+        host: hostname that we want to CONNECT to
+        port: port that we want to connect to
+        proxy_creds: credentials to authenticate at proxy
     """
 
-    def __init__(self, reactor, proxy_endpoint, host, port):
+    def __init__(
+        self,
+        reactor: IReactorCore,
+        proxy_endpoint: IStreamClientEndpoint,
+        host: bytes,
+        port: int,
+        proxy_creds: Optional[ProxyCredentials],
+    ):
         self._reactor = reactor
         self._proxy_endpoint = proxy_endpoint
         self._host = host
         self._port = port
+        self._proxy_creds = proxy_creds
 
     def __repr__(self):
         return "<HTTPConnectProxyEndpoint %s>" % (self._proxy_endpoint,)
 
-    def connect(self, protocolFactory):
-        f = HTTPProxiedClientFactory(self._host, self._port, protocolFactory)
+    # Mypy encounters a false positive here: it complains that ClientFactory
+    # is incompatible with IProtocolFactory. But ClientFactory inherits from
+    # Factory, which implements IProtocolFactory. So I think this is a bug
+    # in mypy-zope.
+    def connect(self, protocolFactory: ClientFactory):  # type: ignore[override]
+        f = HTTPProxiedClientFactory(
+            self._host, self._port, protocolFactory, self._proxy_creds
+        )
         d = self._proxy_endpoint.connect(f)
         # once the tcp socket connects successfully, we need to wait for the
         # CONNECT to complete.
@@ -74,25 +106,39 @@ class HTTPProxiedClientFactory(protocol.ClientFactory):
     HTTP Protocol object and run the rest of the connection.
 
     Args:
-        dst_host (bytes): hostname that we want to CONNECT to
-        dst_port (int): port that we want to connect to
-        wrapped_factory (protocol.ClientFactory): The original Factory
+        dst_host: hostname that we want to CONNECT to
+        dst_port: port that we want to connect to
+        wrapped_factory: The original Factory
+        proxy_creds: credentials to authenticate at proxy
     """
 
-    def __init__(self, dst_host, dst_port, wrapped_factory):
+    def __init__(
+        self,
+        dst_host: bytes,
+        dst_port: int,
+        wrapped_factory: ClientFactory,
+        proxy_creds: Optional[ProxyCredentials],
+    ):
         self.dst_host = dst_host
         self.dst_port = dst_port
         self.wrapped_factory = wrapped_factory
-        self.on_connection = defer.Deferred()
+        self.proxy_creds = proxy_creds
+        self.on_connection: "defer.Deferred[None]" = defer.Deferred()
 
     def startedConnecting(self, connector):
         return self.wrapped_factory.startedConnecting(connector)
 
     def buildProtocol(self, addr):
         wrapped_protocol = self.wrapped_factory.buildProtocol(addr)
+        if wrapped_protocol is None:
+            raise TypeError("buildProtocol produced None instead of a Protocol")
 
         return HTTPConnectProtocol(
-            self.dst_host, self.dst_port, wrapped_protocol, self.on_connection
+            self.dst_host,
+            self.dst_port,
+            wrapped_protocol,
+            self.on_connection,
+            self.proxy_creds,
         )
 
     def clientConnectionFailed(self, connector, reason):
@@ -112,24 +158,37 @@ class HTTPConnectProtocol(protocol.Protocol):
     """Protocol that wraps an existing Protocol to do a CONNECT handshake at connect
 
     Args:
-        host (bytes): The original HTTP(s) hostname or IPv4 or IPv6 address literal
+        host: The original HTTP(s) hostname or IPv4 or IPv6 address literal
             to put in the CONNECT request
 
-        port (int): The original HTTP(s) port to put in the CONNECT request
+        port: The original HTTP(s) port to put in the CONNECT request
 
-        wrapped_protocol (interfaces.IProtocol): the original protocol (probably
-            HTTPChannel or TLSMemoryBIOProtocol, but could be anything really)
+        wrapped_protocol: the original protocol (probably HTTPChannel or
+            TLSMemoryBIOProtocol, but could be anything really)
 
-        connected_deferred (Deferred): a Deferred which will be callbacked with
+        connected_deferred: a Deferred which will be callbacked with
             wrapped_protocol when the CONNECT completes
+
+        proxy_creds: credentials to authenticate at proxy
     """
 
-    def __init__(self, host, port, wrapped_protocol, connected_deferred):
+    def __init__(
+        self,
+        host: bytes,
+        port: int,
+        wrapped_protocol: Protocol,
+        connected_deferred: defer.Deferred,
+        proxy_creds: Optional[ProxyCredentials],
+    ):
         self.host = host
         self.port = port
         self.wrapped_protocol = wrapped_protocol
         self.connected_deferred = connected_deferred
-        self.http_setup_client = HTTPConnectSetupClient(self.host, self.port)
+        self.proxy_creds = proxy_creds
+
+        self.http_setup_client = HTTPConnectSetupClient(
+            self.host, self.port, self.proxy_creds
+        )
         self.http_setup_client.on_connected.addCallback(self.proxyConnected)
 
     def connectionMade(self):
@@ -154,7 +213,7 @@ class HTTPConnectProtocol(protocol.Protocol):
         if buf:
             self.wrapped_protocol.dataReceived(buf)
 
-    def dataReceived(self, data):
+    def dataReceived(self, data: bytes):
         # if we've set up the HTTP protocol, we can send the data there
         if self.wrapped_protocol.connected:
             return self.wrapped_protocol.dataReceived(data)
@@ -168,24 +227,40 @@ class HTTPConnectSetupClient(http.HTTPClient):
     """HTTPClient protocol to send a CONNECT message for proxies and read the response.
 
     Args:
-        host (bytes): The hostname to send in the CONNECT message
-        port (int): The port to send in the CONNECT message
+        host: The hostname to send in the CONNECT message
+        port: The port to send in the CONNECT message
+        proxy_creds: credentials to authenticate at proxy
     """
 
-    def __init__(self, host, port):
+    def __init__(
+        self,
+        host: bytes,
+        port: int,
+        proxy_creds: Optional[ProxyCredentials],
+    ):
         self.host = host
         self.port = port
-        self.on_connected = defer.Deferred()
+        self.proxy_creds = proxy_creds
+        self.on_connected: "defer.Deferred[None]" = defer.Deferred()
 
     def connectionMade(self):
         logger.debug("Connected to proxy, sending CONNECT")
         self.sendCommand(b"CONNECT", b"%s:%d" % (self.host, self.port))
+
+        # Determine whether we need to set Proxy-Authorization headers
+        if self.proxy_creds:
+            # Set a Proxy-Authorization header
+            self.sendHeader(
+                b"Proxy-Authorization",
+                self.proxy_creds.as_proxy_authorization_value(),
+            )
+
         self.endHeaders()
 
-    def handleStatus(self, version, status, message):
+    def handleStatus(self, version: bytes, status: bytes, message: bytes):
         logger.debug("Got Status: %s %s %s", status, message, version)
         if status != b"200":
-            raise ProxyConnectError("Unexpected status on CONNECT: %s" % status)
+            raise ProxyConnectError(f"Unexpected status on CONNECT: {status!s}")
 
     def handleEndHeaders(self):
         logger.debug("End Headers")

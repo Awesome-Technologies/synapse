@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 # Copyright 2018 New Vector Ltd
 # Copyright 2020 The Matrix.org Foundation C.I.C.
@@ -161,6 +160,37 @@ class DeviceTestCase(unittest.HomeserverTestCase):
         # we'd like to check the access token was invalidated, but that's a
         # bit of a PITA.
 
+    def test_delete_device_and_device_inbox(self):
+        self._record_users()
+
+        # add an device_inbox
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                "device_inbox",
+                {
+                    "user_id": user1,
+                    "device_id": "abc",
+                    "stream_id": 1,
+                    "message_json": "{}",
+                },
+            )
+        )
+
+        # delete the device
+        self.get_success(self.handler.delete_device(user1, "abc"))
+
+        # check that the device_inbox was deleted
+        res = self.get_success(
+            self.store.db_pool.simple_select_one(
+                table="device_inbox",
+                keyvalues={"user_id": user1, "device_id": "abc"},
+                retcols=("user_id", "device_id"),
+                allow_none=True,
+                desc="get_device_id_from_device_inbox",
+            )
+        )
+        self.assertIsNone(res)
+
     def test_update_device(self):
         self._record_users()
 
@@ -258,7 +288,7 @@ class DehydrationTestCase(unittest.HomeserverTestCase):
         self.assertEqual(device_data, {"device_data": {"foo": "bar"}})
 
         # Create a new login for the user and dehydrated the device
-        device_id, access_token = self.get_success(
+        device_id, access_token, _expiration_time, _refresh_token = self.get_success(
             self.registration.register_device(
                 user_id=user_id,
                 device_id=None,

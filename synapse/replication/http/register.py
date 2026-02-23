@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2019 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,9 +13,13 @@
 # limitations under the License.
 
 import logging
+from typing import TYPE_CHECKING
 
 from synapse.http.servlet import parse_json_object_from_request
 from synapse.replication.http._base import ReplicationEndpoint
+
+if TYPE_CHECKING:
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +30,7 @@ class ReplicationRegisterServlet(ReplicationEndpoint):
     NAME = "register_user"
     PATH_ARGS = ("user_id",)
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
         self.store = hs.get_datastore()
         self.registration_handler = hs.get_registration_handler()
@@ -77,7 +80,7 @@ class ReplicationRegisterServlet(ReplicationEndpoint):
     async def _handle_request(self, request, user_id):
         content = parse_json_object_from_request(request)
 
-        self.registration_handler.check_registration_ratelimit(content["address"])
+        await self.registration_handler.check_registration_ratelimit(content["address"])
 
         await self.registration_handler.register_with_store(
             user_id=user_id,
@@ -101,7 +104,7 @@ class ReplicationPostRegisterActionsServlet(ReplicationEndpoint):
     NAME = "post_register"
     PATH_ARGS = ("user_id",)
 
-    def __init__(self, hs):
+    def __init__(self, hs: "HomeServer"):
         super().__init__(hs)
         self.store = hs.get_datastore()
         self.registration_handler = hs.get_registration_handler()
@@ -131,6 +134,6 @@ class ReplicationPostRegisterActionsServlet(ReplicationEndpoint):
         return 200, {}
 
 
-def register_servlets(hs, http_server):
+def register_servlets(hs: "HomeServer", http_server):
     ReplicationRegisterServlet(hs).register(http_server)
     ReplicationPostRegisterActionsServlet(hs).register(http_server)

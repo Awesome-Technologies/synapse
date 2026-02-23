@@ -1,8 +1,32 @@
+# Copyright 2018-2021 The Matrix.org Foundation C.I.C.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import json
 import logging
 from collections import deque
 from io import SEEK_END, BytesIO
-from typing import Callable, Iterable, MutableMapping, Optional, Tuple, Union
+from typing import (
+    AnyStr,
+    Callable,
+    Dict,
+    Iterable,
+    MutableMapping,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 import attr
 from typing_extensions import Deque
@@ -10,20 +34,27 @@ from zope.interface import implementer
 
 from twisted.internet import address, threads, udp
 from twisted.internet._resolver import SimpleResolverComplexifier
-from twisted.internet.defer import Deferred, fail, succeed
+from twisted.internet.defer import Deferred, fail, maybeDeferred, succeed
 from twisted.internet.error import DNSLookupError
 from twisted.internet.interfaces import (
+    IAddress,
+    IHostnameResolver,
+    IProtocol,
+    IPullProducer,
+    IPushProducer,
     IReactorPluggableNameResolver,
-    IReactorTCP,
+    IReactorTime,
     IResolverSimple,
+    ITransport,
 )
 from twisted.python.failure import Failure
 from twisted.test.proto_helpers import AccumulatingProtocol, MemoryReactorClock
 from twisted.web.http_headers import Headers
 from twisted.web.resource import IResource
-from twisted.web.server import Site
+from twisted.web.server import Request, Site
 
 from synapse.http.site import SynapseRequest
+from synapse.types import JsonDict
 from synapse.util import Clock
 
 from tests.utils import setup_test_homeserver as _sth
@@ -44,11 +75,11 @@ class FakeChannel:
     wire).
     """
 
-    site = attr.ib(type=Site)
+    site = attr.ib(type=Union[Site, "FakeSite"])
     _reactor = attr.ib()
     result = attr.ib(type=dict, default=attr.Factory(dict))
     _ip = attr.ib(type=str, default="127.0.0.1")
-    _producer = None
+    _producer: Optional[Union[IPullProducer, IPushProducer]] = None
 
     @property
     def json_body(self):
@@ -134,21 +165,19 @@ class FakeChannel:
     def transport(self):
         return self
 
-    def await_result(self, timeout: int = 100) -> None:
+    def await_result(self, timeout_ms: int = 1000) -> None:
         """
         Wait until the request is finished.
         """
+        end_time = self._reactor.seconds() + timeout_ms / 1000.0
         self._reactor.run()
-        x = 0
 
         while not self.is_finished():
             # If there's a producer, tell it to resume producing so we get content
             if self._producer:
                 self._producer.resumeProducing()
 
-            x += 1
-
-            if x > timeout:
+            if self._reactor.seconds() > end_time:
                 raise TimedOutException("Timed out waiting for request to finish.")
 
             self._reactor.advance(0.1)
@@ -158,7 +187,11 @@ class FakeChannel:
 
         Any cookines found are added to the given dict
         """
-        for h in self.headers.getRawHeaders("Set-Cookie"):
+        headers = self.headers.getRawHeaders("Set-Cookie")
+        if not headers:
+            return
+
+        for h in headers:
             parts = h.split(";")
             k, v = parts[0].split("=", maxsplit=1)
             cookies[k] = v
@@ -174,13 +207,14 @@ class FakeSite:
     site_tag = "test"
     access_logger = logging.getLogger("synapse.access.http.fake")
 
-    def __init__(self, resource: IResource):
+    def __init__(self, resource: IResource, reactor: IReactorTime):
         """
 
         Args:
             resource: the resource to be used for rendering all requests
         """
         self._resource = resource
+        self.reactor = reactor
 
     def getResourceFor(self, request):
         return self._resource
@@ -188,19 +222,17 @@ class FakeSite:
 
 def make_request(
     reactor,
-    site: Site,
-    method,
-    path,
-    content=b"",
-    access_token=None,
-    request=SynapseRequest,
-    shorthand=True,
-    federation_auth_origin=None,
-    content_is_form=False,
+    site: Union[Site, FakeSite],
+    method: Union[bytes, str],
+    path: Union[bytes, str],
+    content: Union[bytes, str, JsonDict] = b"",
+    access_token: Optional[str] = None,
+    request: Type[Request] = SynapseRequest,
+    shorthand: bool = True,
+    federation_auth_origin: Optional[bytes] = None,
+    content_is_form: bool = False,
     await_result: bool = True,
-    custom_headers: Optional[
-        Iterable[Tuple[Union[bytes, str], Union[bytes, str]]]
-    ] = None,
+    custom_headers: Optional[Iterable[Tuple[AnyStr, AnyStr]]] = None,
     client_ip: str = "127.0.0.1",
 ) -> FakeChannel:
     """
@@ -209,26 +241,23 @@ def make_request(
     Returns the fake Channel object which records the response to the request.
 
     Args:
+        reactor:
         site: The twisted Site to use to render the request
-
-        method (bytes/unicode): The HTTP request method ("verb").
-        path (bytes/unicode): The HTTP path, suitably URL encoded (e.g.
-        escaped UTF-8 & spaces and such).
-        content (bytes or dict): The body of the request. JSON-encoded, if
-        a dict.
+        method: The HTTP request method ("verb").
+        path: The HTTP path, suitably URL encoded (e.g. escaped UTF-8 & spaces and such).
+        content: The body of the request. JSON-encoded, if a str of bytes.
+        access_token: The access token to add as authorization for the request.
+        request: The request class to create.
         shorthand: Whether to try and be helpful and prefix the given URL
-        with the usual REST API path, if it doesn't contain it.
-        federation_auth_origin (bytes|None): if set to not-None, we will add a fake
+            with the usual REST API path, if it doesn't contain it.
+        federation_auth_origin: if set to not-None, we will add a fake
             Authorization header pretenting to be the given server name.
         content_is_form: Whether the content is URL encoded form data. Adds the
             'Content-Type': 'application/x-www-form-urlencoded' header.
-
-        custom_headers: (name, value) pairs to add as request headers
-
         await_result: whether to wait for the request to complete rendering. If true,
              will pump the reactor until the the renderer tells the channel the request
              is finished.
-
+        custom_headers: (name, value) pairs to add as request headers
         client_ip: The IP to use as the requesting IP. Useful for testing
             ratelimiting.
 
@@ -261,7 +290,7 @@ def make_request(
 
     channel = FakeChannel(site, reactor, ip=client_ip)
 
-    req = request(channel)
+    req = request(channel, site)
     req.content = BytesIO(content)
     # Twisted expects to be at the end of the content when parsing the request.
     req.content.seek(SEEK_END)
@@ -308,10 +337,12 @@ class ThreadedMemoryReactorClock(MemoryReactorClock):
     def __init__(self):
         self.threadpool = ThreadPool(self)
 
-        self._tcp_callbacks = {}
+        self._tcp_callbacks: Dict[Tuple[str, int], Callable] = {}
         self._udp = []
-        lookups = self.lookups = {}
-        self._thread_callbacks = deque()  # type: Deque[Callable[[], None]]()
+        self.lookups: Dict[str, str] = {}
+        self._thread_callbacks: Deque[Callable[[], None]] = deque()
+
+        lookups = self.lookups
 
         @implementer(IResolverSimple)
         class FakeResolver:
@@ -322,6 +353,9 @@ class ThreadedMemoryReactorClock(MemoryReactorClock):
 
         self.nameResolver = SimpleResolverComplexifier(FakeResolver())
         super().__init__()
+
+    def installNameResolver(self, resolver: IHostnameResolver) -> IHostnameResolver:
+        raise NotImplementedError()
 
     def listenUDP(self, port, protocol, interface="", maxPacketSize=8196):
         p = udp.Port(port, protocol, interface, maxPacketSize, self)
@@ -341,7 +375,7 @@ class ThreadedMemoryReactorClock(MemoryReactorClock):
     def getThreadPool(self):
         return self.threadpool
 
-    def add_tcp_client_callback(self, host, port, callback):
+    def add_tcp_client_callback(self, host: str, port: int, callback: Callable):
         """Add a callback that will be invoked when we receive a connection
         attempt to the given IP/port using `connectTCP`.
 
@@ -350,7 +384,7 @@ class ThreadedMemoryReactorClock(MemoryReactorClock):
         """
         self._tcp_callbacks[(host, port)] = callback
 
-    def connectTCP(self, host, port, factory, timeout=30, bindAddress=None):
+    def connectTCP(self, host: str, port: int, factory, timeout=30, bindAddress=None):
         """Fake L{IReactorTCP.connectTCP}."""
 
         conn = super().connectTCP(
@@ -461,12 +495,13 @@ def setup_test_homeserver(cleanup_func, *args, **kwargs):
     return server
 
 
-def get_clock():
+def get_clock() -> Tuple[ThreadedMemoryReactorClock, Clock]:
     clock = ThreadedMemoryReactorClock()
     hs_clock = Clock(clock)
     return clock, hs_clock
 
 
+@implementer(ITransport)
 @attr.s(cmp=False)
 class FakeTransport:
     """
@@ -499,6 +534,9 @@ class FakeTransport:
     will get called back for connectionLost() notifications etc.
     """
 
+    _peer_address: Optional[IAddress] = attr.ib(default=None)
+    """The value to be returend by getPeer"""
+
     disconnecting = False
     disconnected = False
     connected = True
@@ -507,7 +545,7 @@ class FakeTransport:
     autoflush = attr.ib(default=True)
 
     def getPeer(self):
-        return None
+        return self._peer_address
 
     def getHost(self):
         return None
@@ -560,7 +598,12 @@ class FakeTransport:
         self.producerStreaming = streaming
 
         def _produce():
-            d = self.producer.resumeProducing()
+            if not self.producer:
+                # we've been unregistered
+                return
+            # some implementations of IProducer (for example, FileSender)
+            # don't return a deferred.
+            d = maybeDeferred(self.producer.resumeProducing)
             d.addCallback(lambda x: self._reactor.callLater(0.1, _produce))
 
         if not streaming:
@@ -591,12 +634,6 @@ class FakeTransport:
         if self.disconnected:
             return
 
-        if getattr(self.other, "transport") is None:
-            # the other has no transport yet; reschedule
-            if self.autoflush:
-                self._reactor.callLater(0.0, self.flush)
-            return
-
         if maxbytes is not None:
             to_write = self.buffer[:maxbytes]
         else:
@@ -619,7 +656,9 @@ class FakeTransport:
             self.disconnected = True
 
 
-def connect_client(reactor: IReactorTCP, client_id: int) -> AccumulatingProtocol:
+def connect_client(
+    reactor: ThreadedMemoryReactorClock, client_id: int
+) -> Tuple[IProtocol, AccumulatingProtocol]:
     """
     Connect a client to a fake TCP transport.
 

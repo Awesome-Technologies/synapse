@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2018 New Vector Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the 'License');
@@ -16,7 +15,9 @@
 import attr
 from parameterized import parameterized
 
+from synapse.api.room_versions import RoomVersions
 from synapse.events import _EventInternalMetadata
+from synapse.util import json_encoder
 
 import tests.unittest
 import tests.utils
@@ -118,8 +119,7 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
         r = self.get_success(self.store.get_rooms_with_many_extremities(5, 1, [room1]))
         self.assertTrue(r == [room2] or r == [room3])
 
-    @parameterized.expand([(True,), (False,)])
-    def test_auth_difference(self, use_chain_cover_index: bool):
+    def _setup_auth_chain(self, use_chain_cover_index: bool) -> str:
         room_id = "@ROOM:local"
 
         # The silly auth graph we use to test the auth difference algorithm,
@@ -165,7 +165,7 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
             "j": 1,
         }
 
-        # Mark the room as not having a cover index
+        # Mark the room as maybe having a cover index.
 
         def store_room(txn):
             self.store.db_pool.simple_insert_txn(
@@ -221,6 +221,77 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
                 insert_event,
             )
         )
+
+        return room_id
+
+    @parameterized.expand([(True,), (False,)])
+    def test_auth_chain_ids(self, use_chain_cover_index: bool):
+        room_id = self._setup_auth_chain(use_chain_cover_index)
+
+        # a and b have the same auth chain.
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["a"]))
+        self.assertCountEqual(auth_chain_ids, ["e", "f", "g", "h", "i", "j", "k"])
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["b"]))
+        self.assertCountEqual(auth_chain_ids, ["e", "f", "g", "h", "i", "j", "k"])
+        auth_chain_ids = self.get_success(
+            self.store.get_auth_chain_ids(room_id, ["a", "b"])
+        )
+        self.assertCountEqual(auth_chain_ids, ["e", "f", "g", "h", "i", "j", "k"])
+
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["c"]))
+        self.assertCountEqual(auth_chain_ids, ["g", "h", "i", "j", "k"])
+
+        # d and e have the same auth chain.
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["d"]))
+        self.assertCountEqual(auth_chain_ids, ["f", "g", "h", "i", "j", "k"])
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["e"]))
+        self.assertCountEqual(auth_chain_ids, ["f", "g", "h", "i", "j", "k"])
+
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["f"]))
+        self.assertCountEqual(auth_chain_ids, ["g", "h", "i", "j", "k"])
+
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["g"]))
+        self.assertCountEqual(auth_chain_ids, ["h", "i", "j", "k"])
+
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["h"]))
+        self.assertEqual(auth_chain_ids, ["k"])
+
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["i"]))
+        self.assertEqual(auth_chain_ids, ["j"])
+
+        # j and k have no parents.
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["j"]))
+        self.assertEqual(auth_chain_ids, [])
+        auth_chain_ids = self.get_success(self.store.get_auth_chain_ids(room_id, ["k"]))
+        self.assertEqual(auth_chain_ids, [])
+
+        # More complex input sequences.
+        auth_chain_ids = self.get_success(
+            self.store.get_auth_chain_ids(room_id, ["b", "c", "d"])
+        )
+        self.assertCountEqual(auth_chain_ids, ["e", "f", "g", "h", "i", "j", "k"])
+
+        auth_chain_ids = self.get_success(
+            self.store.get_auth_chain_ids(room_id, ["h", "i"])
+        )
+        self.assertCountEqual(auth_chain_ids, ["k", "j"])
+
+        # e gets returned even though include_given is false, but it is in the
+        # auth chain of b.
+        auth_chain_ids = self.get_success(
+            self.store.get_auth_chain_ids(room_id, ["b", "e"])
+        )
+        self.assertCountEqual(auth_chain_ids, ["e", "f", "g", "h", "i", "j", "k"])
+
+        # Test include_given.
+        auth_chain_ids = self.get_success(
+            self.store.get_auth_chain_ids(room_id, ["i"], include_given=True)
+        )
+        self.assertCountEqual(auth_chain_ids, ["i", "j"])
+
+    @parameterized.expand([(True,), (False,)])
+    def test_auth_difference(self, use_chain_cover_index: bool):
+        room_id = self._setup_auth_chain(use_chain_cover_index)
 
         # Now actually test that various combinations give the right result:
 
@@ -434,6 +505,61 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
             self.store.get_auth_chain_difference(room_id, [{"a"}])
         )
         self.assertSetEqual(difference, set())
+
+    def test_prune_inbound_federation_queue(self):
+        "Test that pruning of inbound federation queues work"
+
+        room_id = "some_room_id"
+
+        # Insert a bunch of events that all reference the previous one.
+        self.get_success(
+            self.store.db_pool.simple_insert_many(
+                table="federation_inbound_events_staging",
+                values=[
+                    {
+                        "origin": "some_origin",
+                        "room_id": room_id,
+                        "received_ts": 0,
+                        "event_id": f"$fake_event_id_{i + 1}",
+                        "event_json": json_encoder.encode(
+                            {"prev_events": [f"$fake_event_id_{i}"]}
+                        ),
+                        "internal_metadata": "{}",
+                    }
+                    for i in range(500)
+                ],
+                desc="test_prune_inbound_federation_queue",
+            )
+        )
+
+        # Calling prune once should return True, i.e. a prune happen. The second
+        # time it shouldn't.
+        pruned = self.get_success(
+            self.store.prune_staged_events_in_room(room_id, RoomVersions.V6)
+        )
+        self.assertTrue(pruned)
+
+        pruned = self.get_success(
+            self.store.prune_staged_events_in_room(room_id, RoomVersions.V6)
+        )
+        self.assertFalse(pruned)
+
+        # Assert that we only have a single event left in the queue, and that it
+        # is the last one.
+        count = self.get_success(
+            self.store.db_pool.simple_select_one_onecol(
+                table="federation_inbound_events_staging",
+                keyvalues={"room_id": room_id},
+                retcol="COALESCE(COUNT(*), 0)",
+                desc="test_prune_inbound_federation_queue",
+            )
+        )
+        self.assertEqual(count, 1)
+
+        _, event_id = self.get_success(
+            self.store.get_next_staged_event_id_for_room(room_id)
+        )
+        self.assertEqual(event_id, "$fake_event_id_500")
 
 
 @attr.s

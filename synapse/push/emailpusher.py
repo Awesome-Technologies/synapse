@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright 2016 OpenMarket Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,15 +15,18 @@
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from twisted.internet.base import DelayedCall
 from twisted.internet.error import AlreadyCalled, AlreadyCancelled
+from twisted.internet.interfaces import IDelayedCall
 
 from synapse.metrics.background_process_metrics import run_as_background_process
-from synapse.push import Pusher, PusherConfig, ThrottleParams
+from synapse.push import Pusher, PusherConfig, PusherConfigException, ThrottleParams
 from synapse.push.mailer import Mailer
+from synapse.push.push_types import EmailReason
+from synapse.storage.databases.main.event_push_actions import EmailPushAction
+from synapse.util.threepids import validate_email
 
 if TYPE_CHECKING:
-    from synapse.app.homeserver import HomeServer
+    from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +68,17 @@ class EmailPusher(Pusher):
 
         self.store = self.hs.get_datastore()
         self.email = pusher_config.pushkey
-        self.timed_call = None  # type: Optional[DelayedCall]
-        self.throttle_params = {}  # type: Dict[str, ThrottleParams]
+        self.timed_call: Optional[IDelayedCall] = None
+        self.throttle_params: Dict[str, ThrottleParams] = {}
         self._inited = False
 
         self._is_processing = False
+
+        # Make sure that the email is valid.
+        try:
+            validate_email(self.email)
+        except ValueError:
+            raise PusherConfigException("Invalid email")
 
     def on_started(self, should_check_for_notifs: bool) -> None:
         """Called when this pusher has been started.
@@ -162,7 +170,7 @@ class EmailPusher(Pusher):
             )
         )
 
-        soonest_due_at = None  # type: Optional[int]
+        soonest_due_at: Optional[int] = None
 
         if not unprocessed:
             await self.save_last_stream_ordering_and_success(self.max_stream_ordering)
@@ -178,13 +186,13 @@ class EmailPusher(Pusher):
 
             should_notify_at = max(notif_ready_at, room_ready_at)
 
-            if should_notify_at < self.clock.time_msec():
+            if should_notify_at <= self.clock.time_msec():
                 # one of our notifications is ready for sending, so we send
                 # *one* email updating the user on their notifications,
                 # we then consider all previously outstanding notifications
                 # to be delivered.
 
-                reason = {
+                reason: EmailReason = {
                     "room_id": push_action["room_id"],
                     "now": self.clock.time_msec(),
                     "received_at": received_at,
@@ -269,7 +277,7 @@ class EmailPusher(Pusher):
         return may_send_at
 
     async def sent_notif_update_throttle(
-        self, room_id: str, notified_push_action: dict
+        self, room_id: str, notified_push_action: EmailPushAction
     ) -> None:
         # We have sent a notification, so update the throttle accordingly.
         # If the event that triggered the notif happened more than
@@ -309,7 +317,9 @@ class EmailPusher(Pusher):
             self.pusher_id, room_id, self.throttle_params[room_id]
         )
 
-    async def send_notification(self, push_actions: List[dict], reason: dict) -> None:
+    async def send_notification(
+        self, push_actions: List[EmailPushAction], reason: EmailReason
+    ) -> None:
         logger.info("Sending notif email for user %r", self.user_id)
 
         await self.mailer.send_notification_mail(
